@@ -167,7 +167,11 @@ def mode_title(mode):
 DEFAULT_STATE = {
     "enabled": False,      # is auto-switching armed?
     "mode": MODE_MODEL,
-    "min_margin": 5,       # % of headroom below which an account counts as spent
+    # An account counts as spent once its worst window reaches this. Expressed
+    # as usage, like every figure on screen — the old setting said the same
+    # thing as remaining margin, which read backwards against the display.
+    # Lower it to move off an account before you hit the wall rather than at it.
+    "max_usage": 95,
     "cooldown_min": 10,    # minimum delay between two automatic switches
     "last_switch": 0,
 }
@@ -200,7 +204,10 @@ def _read_json(path, default):
 
 
 def load_state():
-    return dict(DEFAULT_STATE, **_read_json(STATE_FILE, {}))
+    stored = _read_json(STATE_FILE, {})
+    if "min_margin" in stored and "max_usage" not in stored:
+        stored["max_usage"] = 100 - stored.pop("min_margin")   # older wording
+    return dict(DEFAULT_STATE, **stored)
 
 
 def save_state(state):
@@ -626,10 +633,8 @@ def active_row(rows):
 def general_headroom(p):
     """Headroom on the general limits (5h session + week), in %.
     None when the account said nothing."""
-    general = [l for l in p["limits"] if l["kind"] in GENERAL_KINDS]
-    if p["status"] != OK or not general:
-        return None
-    return 100 - max(l["percent"] for l in general)
+    worst = worst_general(p)
+    return None if worst is None else 100 - worst
 
 
 def seat_kind(p):
@@ -696,14 +701,22 @@ def weekly_reset(p):
     return epoch_of(weekly["resets_at"]) if weekly else None
 
 
-def usable_accounts(rows, min_margin):
+def worst_general(p):
+    """The fuller of the two general windows — the one that stops you first."""
+    general = [l for l in p["limits"] if l["kind"] in GENERAL_KINDS]
+    if p["status"] != OK or not general:
+        return None
+    return max(l["percent"] for l in general)
+
+
+def usable_accounts(rows, max_usage):
     """Accounts with room on both general windows.
 
-    general_headroom is 100 minus the *worst* of the session and weekly
-    percentages, so clearing this bar means neither is near its limit.
+    The test is on the fuller of the two, so clearing it means neither the
+    five-hour nor the weekly window is near its limit.
     """
     return [p for p in rows
-            if p["status"] == OK and (general_headroom(p) or 0) > min_margin]
+            if worst_general(p) is not None and worst_general(p) < max_usage]
 
 
 def preference(rows, state):
@@ -713,7 +726,7 @@ def preference(rows, state):
     the choice explain itself — otherwise the greenest-looking account not
     being chosen just looks like a bug.
     """
-    usable = usable_accounts(rows, state["min_margin"])
+    usable = usable_accounts(rows, state["max_usage"])
     if not usable:
         return []
     if state.get("mode") == MODE_ENDURANCE:
@@ -758,11 +771,10 @@ def _by_endurance(usable):
 
 def switch_trigger(active, target, state):
     """Why the active account should be abandoned, or None to stay."""
-    min_margin = state["min_margin"]
     if active["status"] != OK:
         return "current account unreachable"
-    if (general_headroom(active) or 0) <= min_margin:
-        return "general limits maxed out (%d%% left)" % (general_headroom(active) or 0)
+    if (worst_general(active) or 100) >= state["max_usage"]:
+        return "general limits at %d%%" % (worst_general(active) or 100)
     if state.get("mode") == MODE_ENDURANCE:
         # Here moving is the whole point: the target's allowance expires first,
         # so spending it now is what keeps the long-dated ones in reserve.
@@ -832,10 +844,10 @@ def fleet(rows, state):
     readable = [p for p in rows if p["status"] == OK and p["limits"]]
     reserve = sum(100 - l["percent"]
                   for p in readable for l in p["limits"] if l["kind"] == "weekly_all")
-    spent = [p for p in readable if (general_headroom(p) or 0) <= state["min_margin"]]
+    spent = [p for p in readable if (worst_general(p) or 100) >= state["max_usage"]]
     waiting = first_to_recover(spent)
     return {
-        "usable": len(usable_accounts(rows, state["min_margin"])),
+        "usable": len(usable_accounts(rows, state["max_usage"])),
         "total": len(rows),
         # In whole accounts: 191% is nearly two untouched weeks of allowance.
         "weekly_reserve": reserve,

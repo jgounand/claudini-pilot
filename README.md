@@ -208,7 +208,7 @@ Tuning lives in `~/.claudini/auto.json`:
 |---|---|---|
 | `enabled` | `false` | auto-switching armed |
 | `mode` | `model` | `model` keeps Fable available, `endurance` spends what resets soonest |
-| `min_margin` | `5` | % of general headroom below which an account counts as spent |
+| `max_usage` | `95` | an account counts as spent once its fullest window reaches this % — lower it to move off an account *before* hitting the wall |
 | `cooldown_min` | `10` | minutes between two automatic switches |
 
 ## Switching, without claudini

@@ -46,7 +46,6 @@ struct Profile: Decodable {
 struct Binding: Decodable {
     let label: String
     let percent: Int
-    let headroom: Int
     let level: String
     let resets_at_epoch: Int?
 }
@@ -253,10 +252,14 @@ final class Bar: NSObject, NSMenuDelegate {
 
         // Name the window that is actually closest, because which one binds
         // changes through the day: the 5-hour early on, the weekly by Friday.
+        //
+        // The figure is what has been *used*, like every row below and like
+        // the ring beside it. Reporting what was left here while the rows
+        // reported what was spent put two different numbers on one limit.
         let title = NSMutableAttributedString(attributedString:
             text(" " + active.name + " ", 12, .medium))
         if let binding = active.binding {
-            title.append(digits("\(binding.label) \(binding.headroom)%", 12, shade))
+            title.append(digits("\(binding.label) \(binding.percent)%", 12, shade))
         } else {
             title.append(text("?", 12))
         }
