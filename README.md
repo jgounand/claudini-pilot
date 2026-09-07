@@ -59,7 +59,7 @@ Requires macOS, [claudini](https://github.com/kimrgrey/claudini), Python 3.9+,
 and Xcode Command Line Tools for the menu bar app.
 
 ```sh
-git clone https://github.com/<you>/claudini-console.git
+git clone https://github.com/jgounand/claudini-console.git
 cd claudini-console
 ./install.sh
 ```
