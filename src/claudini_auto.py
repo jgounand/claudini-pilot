@@ -19,32 +19,45 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import claudini_usage as cu  # noqa: E402
 
 COLORS = {"ok": 1, "warning": 2, "critical": 3}
-REDRAW_MS = 5000
+# getch gives up this often; the frame is only actually repainted when
+# something changed, so a short wait costs a wakeup and no work.
+POLL_MS = 2000
 
-# Table layout: (x, width, heading). The header line is built from this, so
-# columns and headings cannot drift apart.
+# Table layout: (gap before, width, heading). Positions are derived, so a
+# column cannot be widened without moving the ones after it.
 COLUMNS = [
     (5, 15, "profile"),
-    (21, 22, "account"),
-    (44, 12, "workspace"),
-    (57, 9, "plan"),
-    (68, 7, "session"),
-    (76, 7, "week"),
-    (84, 6, cu.PREFERRED_MODEL),
-    (91, 7, "reset"),
-    (100, 1, "⟲"),
+    (1, 22, "account"),
+    (1, 12, "workspace"),
+    (1, 9, "plan"),
+    (2, 7, "session"),
+    (1, 7, "week"),
+    (1, 6, cu.PREFERRED_MODEL),
+    (1, 7, "reset"),
+    (2, 1, "⟲"),
 ]
-COL = {name: x for x, _, name in COLUMNS}
-WIDTH = {name: w for _, w, name in COLUMNS}
-# The engine decides what counts as a general limit; we only place its columns.
-COL_LIMITS = dict(zip(cu.GENERAL_KINDS, (COL["session"], COL["week"])))
+
+
+def _layout():
+    x, columns = 0, {}
+    for gap, width, name in COLUMNS:
+        x += gap
+        columns[name] = (x, width)
+        x += width
+    return columns
+
+
+LAYOUT = _layout()
+COL = {name: x for name, (x, _) in LAYOUT.items()}
+WIDTH = {name: w for name, (_, w) in LAYOUT.items()}
+COL_LIMITS = {"session": COL["session"], "weekly_all": COL["week"]}
 FOOTER = (" a auto · m mode · r refresh · 1-9 switch or reconnect · q quit"
           "   ⟲ = /limit-reset ")
 
 
 def header_line():
     line = "  #"
-    for x, _, name in COLUMNS:
+    for name, (x, _) in LAYOUT.items():
         line = line.ljust(x) + name
     return line
 
@@ -59,38 +72,46 @@ class Console:
         self.plan = (None, "", None)
         self.message = "loading…"
         self.busy = False
+        self.version = 0          # bumped by refresh so the drawing loop notices
+        self.painted = None
         self.lock = threading.Lock()
 
     # --- data ----------------------------------------------------------------
 
-    def refresh(self, run_auto=True):
+    def refresh(self, run_auto=True, force=False):
         with self.lock:
             if self.busy:
                 return          # a pass is already in flight; don't stack them
             self.busy = True
         state = cu.load_state()
-        rows = cu.collect()
+        rows = cu.collect(force)
         message = ""
-        if run_auto and state["enabled"]:
-            rows, moved, message = cu.auto_tick(rows)
+        plan, message = None, ""
+        if run_auto:
+            rows, moved, message, plan = cu.auto_tick(rows)
             if moved:
                 message = "auto-switched: " + message
         throttled = cu.throttled_for()
-        # The plan is worked out once here, not on every frame.
-        plan = cu.plan_switch(rows, state)
+        # Worked out once here, not on every frame.
+        plan = plan or cu.plan_switch(rows, state)
         with self.lock:
             self.rows, self.state, self.plan = rows, state, plan
             self.message = (cu.throttle_notice(throttled) if throttled
                             else message or time.strftime("updated at %H:%M:%S"))
             self.busy = False
+            self.version += 1
 
-    def spawn(self, run_auto=True):
-        threading.Thread(target=self.refresh, args=(run_auto,), daemon=True).start()
+    def spawn(self, run_auto=True, force=False):
+        threading.Thread(target=self.refresh, args=(run_auto, force), daemon=True).start()
 
     def loop(self):
+        """A true POLL_SEC period: letting the pass duration add to the sleep
+        makes the phase drift against the menu bar's fixed timer, and the two
+        eventually land in the window where both miss the cache."""
         while True:
-            time.sleep(cu.POLL_SEC)
+            started = time.monotonic()
             self.refresh()
+            time.sleep(max(0, cu.POLL_SEC - (time.monotonic() - started)))
 
     # --- drawing -------------------------------------------------------------
 
@@ -111,7 +132,18 @@ class Console:
         except curses.error:
             pass
 
-    def draw(self, scr):
+    def draw(self, scr, force=False):
+        """Repaint only when something a viewer could see has changed.
+
+        Countdowns move by the minute, so between refreshes almost every frame
+        would be byte-identical.
+        """
+        with self.lock:
+            stamp = (self.version, self.busy, self.message, int(time.time() // 30))
+        if not force and stamp == self.painted:
+            return
+        self.painted = stamp
+
         scr.erase()
         h, _ = scr.getmaxyx()
         with self.lock:
@@ -126,10 +158,8 @@ class Console:
                  curses.color_pair(1) | curses.A_BOLD if auto_on else curses.A_DIM)
         self.put(scr, 0, 42, "mode: " + state["mode"], curses.A_BOLD)
         if target:
-            # Staying put is explained by the reason; a target we are not
-            # taking is explained by what blocks it.
-            same = active and target["name"] == active["name"]
-            note = "next: %s — %s" % (target["name"], why if same else (blocked or why))
+            same = cu.staying(rows, (target, why, blocked))
+            note = "next: %s — %s" % (target["name"], blocked or why)
             self.put(scr, 0, 62, note, curses.A_DIM if same else curses.color_pair(2))
 
         self.put(scr, 2, 0, HEADER, curses.A_DIM)
@@ -171,10 +201,12 @@ class Console:
             self.put(scr, y, column, "%3d%%" % limit["percent"],
                      curses.color_pair(COLORS[cu.level(limit["percent"])]))
 
-        session = next((l for l in p["limits"] if l["kind"] == cu.GENERAL_KINDS[0]), None)
-        if session:
+        # The reset shown is the one for the window that actually binds, so it
+        # agrees with the percentage the eye lands on first.
+        binding = cu.binding_limit(p)
+        if binding:
             self.put(scr, y, COL["reset"],
-                     cu.until(cu.seconds_until(session["resets_at"]))[:WIDTH["reset"]],
+                     cu.until(cu.seconds_until_epoch(binding["resets_at_epoch"]))[:WIDTH["reset"]],
                      curses.A_DIM)
         if p.get("limit_reset"):
             self.put(scr, y, COL["⟲"], "⟲", curses.color_pair(1))
@@ -192,7 +224,7 @@ class Console:
         try:
             answer = scr.getch()
         finally:
-            scr.timeout(REDRAW_MS)
+            scr.timeout(POLL_MS)
         if answer not in (ord("l"), ord("L")):
             with self.lock:
                 self.message = "login cancelled"
@@ -203,6 +235,7 @@ class Console:
         input("\nPress return to go back to the console…")
         scr.clear()
         curses.doupdate()
+        self.painted = None
         self.spawn(run_auto=False)
 
     def choose(self, scr, index):
@@ -237,8 +270,8 @@ class Console:
         cu.save_state(state)
         with self.lock:
             self.state = state
+            self.plan = cu.plan_switch(self.rows, state)
             self.message = "mode: %s" % state["mode"]
-        self.spawn(run_auto=False)
 
     # --- key loop ------------------------------------------------------------
 
@@ -248,20 +281,19 @@ class Console:
         for pair, color in ((1, curses.COLOR_GREEN), (2, curses.COLOR_YELLOW),
                             (3, curses.COLOR_RED)):
             curses.init_pair(pair, color, -1)
-        # Countdowns move by the minute, so redrawing every few seconds is
-        # already generous; a keypress still wakes getch instantly.
-        scr.timeout(REDRAW_MS)
+        scr.timeout(POLL_MS)
 
-        self.spawn()
         threading.Thread(target=self.loop, daemon=True).start()
 
         while True:
             self.draw(scr)
             key = scr.getch()
+            if key == -1:
+                continue          # nothing pressed; draw() decides if anything moved
             if key in (ord("q"), ord("Q")):
                 return
             if key in (ord("r"), ord("R")):
-                self.spawn()
+                self.spawn(force=True)      # asked for by hand: skip the waiting periods
             elif key in (ord("a"), ord("A")):
                 self.toggle_auto()
             elif key in (ord("m"), ord("M")):

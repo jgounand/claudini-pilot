@@ -15,6 +15,7 @@ Usage:
   claudini_usage.py --tick        # run one auto-switch decision
 """
 
+import collections
 import concurrent.futures
 import contextlib
 import datetime as dt
@@ -50,22 +51,22 @@ BETA = "oauth-2025-04-20"
 USER_AGENT = "claudini-pilot/1.0 (+https://github.com/jgounand/claudini-pilot)"
 
 ACCOUNT = getpass.getuser()
-REFRESH_LOCK = threading.Lock()
-REFRESH_LOCK_FILE = os.path.join(CLAUDINI_HOME, "refresh.lock")
+REFRESH_LOCKS = collections.defaultdict(threading.Lock)
 
 
 @contextlib.contextmanager
-def refresh_guard():
+def refresh_guard(name):
     """Serialise token refreshes across processes, not merely across threads.
 
     The refresh token rotates on every use, and the console, the menu bar and
     a one-off CLI run are three separate processes. Two of them refreshing the
     same profile at once means the loser presents a token the winner already
     consumed — which comes back as a dead credential on a perfectly good
-    account.
+    account. The guard is per profile: two different accounts refreshing at
+    once contend for nothing.
     """
-    with REFRESH_LOCK:
-        with open(REFRESH_LOCK_FILE, "w") as handle:
+    with REFRESH_LOCKS[name]:
+        with open(os.path.join(CLAUDINI_HOME, "refresh-%s.lock" % name), "w") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
                 yield
@@ -103,22 +104,45 @@ SUCCESS_TTL = POLL_SEC - 20
 IDENTITY_TTL = 24 * 3600  # an account's org doesn't move: re-read once a day
 THROTTLE_SEC = 180        # after a 429, stop touching the API entirely
 
-# A broken account is retried on a widening delay. Each retry costs a token
-# refresh that is bound to fail against the endpoint that rate-limits fastest,
-# so a flat interval burns hundreds of doomed requests a week for nothing.
-# reconnect() clears the entry, so a real login is picked up on the next pass
-# however deep the backoff went.
-FAIL_TTL = 15 * 60
-MAX_FAIL_TTL = 6 * 3600
+
 
 # Status is a closed set the machine reads; `detail` carries the sentence for
 # the human. Keeping them in one string meant every consumer had to classify
 # by negation, and a passing network blip was shown as a credentials problem.
 OK = "ok"
-RATE_LIMITED = "rate limited"
-NEEDS_LOGIN = "login required"
+RATE_LIMITED = "rate_limited"
+NEEDS_LOGIN = "needs_login"
 UNREACHABLE = "unreachable"
-BLOCKED = "oauth blocked"
+BLOCKED = "oauth_blocked"
+
+# The tokens above are for the machine; this is what a person reads when the
+# failure carries no more specific detail of its own.
+STATUS_TEXT = {
+    OK: "ok",
+    RATE_LIMITED: "rate limited",
+    NEEDS_LOGIN: "login required",
+    UNREACHABLE: "unreachable",
+    BLOCKED: "OAuth blocked for this workspace",
+}
+
+
+def status_text(row):
+    return row.get("detail") or STATUS_TEXT.get(row["status"], row["status"])
+
+
+# How soon to try a failed account again — (first delay, ceiling), doubling in
+# between. What matters is whether waiting can plausibly fix it: a dropped
+# network heals by itself in seconds, a dead token needs you, and an
+# organisation's OAuth policy will not change this afternoon. Treating them
+# alike either burns doomed requests or hides an account for hours after a
+# two-second outage.
+RETRY = {
+    UNREACHABLE: (20, 5 * 60),
+    RATE_LIMITED: (THROTTLE_SEC, THROTTLE_SEC),
+    NEEDS_LOGIN: (15 * 60, 6 * 3600),
+    BLOCKED: (6 * 3600, 6 * 3600),
+}
+DEFAULT_RETRY = (15 * 60, 6 * 3600)
 
 # Two ways to be optimal, because there are two different goals.
 #   model      — protect the preferred model's weekly quota above all else.
@@ -127,6 +151,15 @@ BLOCKED = "oauth blocked"
 MODE_MODEL = "model"
 MODE_ENDURANCE = "endurance"
 MODES = (MODE_MODEL, MODE_ENDURANCE)
+MODE_TITLES = {
+    MODE_MODEL: "model — keep %s available",
+    MODE_ENDURANCE: "endurance — spend what resets soonest",
+}
+
+
+def mode_title(mode):
+    return MODE_TITLES.get(mode, mode) % PREFERRED_MODEL if "%s" in MODE_TITLES.get(
+        mode, "") else MODE_TITLES.get(mode, mode)
 
 DEFAULT_STATE = {
     "enabled": False,      # is auto-switching armed?
@@ -136,8 +169,7 @@ DEFAULT_STATE = {
     "last_switch": 0,
 }
 
-CACHE_VERSION = 5
-EMPTY_CACHE = {"profiles": {}, "identity": {}, "throttled_until": 0}
+CACHE_VERSION = 7
 
 
 def needs_login(row):
@@ -178,7 +210,7 @@ def load_cache():
     doesn't carry the same fields, so it is dropped."""
     data = _read_json(CACHE_FILE, {})
     if data.get("version") != CACHE_VERSION:
-        return {k: (dict(v) if isinstance(v, dict) else v) for k, v in EMPTY_CACHE.items()}
+        data = {}
     return {"profiles": data.get("profiles", {}),
             "identity": data.get("identity", {}),
             "throttled_until": data.get("throttled_until", 0)}
@@ -254,7 +286,27 @@ def profiles():
                   if os.path.isfile(profile_config(d)))
 
 
-_META_CACHE = {}
+_CONFIG_CACHE = {}
+
+
+def profile_document(name):
+    """The profile's claude.json, parsed once per change.
+
+    It is ~100 kB and holds two things we want — the account's email and the
+    /limit-reset flag, plus the usage Claude Code cached there. Parsing it
+    twice per pass was most of the cost of reading a profile.
+    """
+    path = profile_config(name)
+    try:
+        stamp = os.stat(path).st_mtime
+    except OSError:
+        return {}
+    cached = _CONFIG_CACHE.get(path)
+    if cached and cached[0] == stamp:
+        return cached[1]
+    document = _read_json(path, {})
+    _CONFIG_CACHE[path] = (stamp, document)
+    return document
 
 
 def profile_meta(name):
@@ -266,21 +318,10 @@ def profile_meta(name):
     That file is ~100 kB and only changes on a switch or a login, so it is
     re-parsed on mtime rather than on every pass.
     """
-    path = profile_config(name)
-    try:
-        stamp = os.stat(path).st_mtime
-    except OSError:
-        return None, None
-    cached = _META_CACHE.get(path)
-    if cached and cached[0] == stamp:
-        return cached[1]
-
-    data = _read_json(path, {})
+    data = profile_document(name)
     flag = (data.get("cachedGrowthBookFeatures") or {}).get(LIMIT_RESET_FLAG)
-    meta = ((data.get("oauthAccount") or {}).get("emailAddress"),
+    return ((data.get("oauthAccount") or {}).get("emailAddress"),
             flag.get("enabled") if isinstance(flag, dict) else None)
-    _META_CACHE[path] = (stamp, meta)
-    return meta
 
 
 # --- API ---------------------------------------------------------------------
@@ -298,7 +339,7 @@ def http_json(url, token=None, data=None, timeout=20):
         return json.load(resp)
 
 
-def refresh(service, creds):
+def refresh(name, service, creds):
     """Refresh an expired access token and write it back to the keychain.
 
     Returns (token, status, detail) — status is None when it worked.
@@ -310,7 +351,7 @@ def refresh(service, creds):
     # Refreshes are rare and the endpoint rate-limits fast: one at a time. The
     # timeout is short because this lock is held across it, and a stalled
     # refresh would block every other profile behind it.
-    with refresh_guard():
+    with refresh_guard(name):
         # Someone may have refreshed this profile while we waited for the
         # lock; their token is the live one, ours is already spent.
         stored = (keychain_read(service) or {}).get("claudeAiOauth") or {}
@@ -378,7 +419,7 @@ LOCAL_USAGE_TTL = 10 * 60
 
 def local_usage(name, expected_uuid):
     """The usage Claude Code already fetched for this profile, or None."""
-    cached = _read_json(profile_config(name), {}).get("cachedUsageUtilization") or {}
+    cached = profile_document(name).get("cachedUsageUtilization") or {}
     if not expected_uuid or cached.get("accountUuid") != expected_uuid:
         return None
     age = dt.datetime.now().timestamp() - cached.get("fetchedAtMs", 0) / 1000
@@ -439,13 +480,6 @@ def fetch(name, is_active, identity=None):
     out = base_row(name, is_active)
     out["source"] = "api"
 
-    if is_active and identity:
-        local = local_usage(name, identity.get("account_uuid"))
-        if local is not None:
-            out.update(identity)
-            out["source"] = "local"
-            return parse_usage(out, local), None
-
     # The active profile also lives in Claude Code's own keychain slot, kept
     # current continuously — prefer it over claudini's snapshot.
     service = profile_service(name)
@@ -458,24 +492,20 @@ def fetch(name, is_active, identity=None):
     token = creds["claudeAiOauth"].get("accessToken")
     expired = creds["claudeAiOauth"].get("expiresAt", 0) / 1000 < dt.datetime.now().timestamp()
 
-    def read_usage(tok):
-        return http_json(USAGE_URL, token=tok)
-
     # One retry, and only one: an expired token is refreshed up front, and a
     # token the server rejects is refreshed once before giving up. The active
     # profile is never refreshed here — Claude Code owns that slot.
     for attempt in range(2):
         if (expired or attempt) and not is_active:
-            token, status, detail = refresh(service, creds)
+            token, status, detail = refresh(name, service, creds)
             if not token:
                 return _failed(out, status, detail)
-            expired = False
         try:
-            data = read_usage(token)
+            data = http_json(USAGE_URL, token=token)
             break
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                return _failed(out, RATE_LIMITED)
+                return _failed(out, RATE_LIMITED, "the API is rate limiting us")
             body = (e.read() or b"").decode("utf8", "replace")[:400]
             # A permission error is the organisation refusing OAuth, not a bad
             # token — refreshing or logging in again cannot fix it.
@@ -489,8 +519,6 @@ def fetch(name, is_active, identity=None):
             return _failed(out, UNREACHABLE, "HTTP error %d" % e.code)
         except Exception as e:
             return _failed(out, UNREACHABLE, "unreachable (%s)" % type(e).__name__)
-    else:
-        return _failed(out, NEEDS_LOGIN, "credentials rejected by the API")
 
     fresh_identity = None
     if identity is None:
@@ -502,28 +530,24 @@ def fetch(name, is_active, identity=None):
 
 
 def fail_delay(failures, status=None):
-    """How long to leave a broken account alone after N consecutive failures.
-
-    An organisation that forbids OAuth won't change its mind in a quarter of
-    an hour, so that one goes straight to the ceiling.
-    """
-    if status == BLOCKED:
-        return MAX_FAIL_TTL
-    return min(FAIL_TTL * 2 ** max(0, failures - 1), MAX_FAIL_TTL)
+    """How long to leave a failed account alone, per what went wrong."""
+    first, ceiling = RETRY.get(status, DEFAULT_RETRY)
+    return min(first * 2 ** max(0, failures - 1), ceiling)
 
 
-_throttled_until = None
-
-
-def collect():
+def collect(force=False):
     """Every profile's usage, hitting the API as little as possible.
+
+    `force` is a person asking for it now: it skips the per-account waiting
+    periods so a account that failed while the network was down comes back
+    immediately rather than at the end of its backoff. The 429 guard still
+    applies — asking harder does not make the API answer.
 
     A good read is served for SUCCESS_TTL, a broken one for a delay that widens
     with each consecutive failure, and after a 429 the API isn't called at all
     until the guard expires. The cache is read and written here and nowhere
     else: the parallel reads never touch the file.
     """
-    global _throttled_until
     act = active_profile()
     cache = load_cache()
     entries, identities = cache["profiles"], cache["identity"]
@@ -536,18 +560,32 @@ def collect():
 
     def one(name):
         entry = entries.get(name)
+        known = identities.get(name)
+        identity = known["info"] if known and now - known["at"] < IDENTITY_TTL else None
+
+        # Claude Code keeps the running account's usage on disk and updates it
+        # as you work, so for that profile there is nothing to ask for. This
+        # sits above the cache gate on purpose: waiting for the entry to
+        # expire would serve numbers minutes older than the ones already here.
+        if name == act and identity:
+            local = local_usage(name, identity.get("account_uuid"))
+            if local is not None:
+                row = parse_usage(dict(base_row(name, True), source="local"), local)
+                row.update(identity)
+                entries[name] = {"at": now, "row": row, "fails": 0}
+                return row
+
         if muted:
-            return served(entry, name) if entry else base_row(name, name == act, RATE_LIMITED)
-        if entry:
+            return (served(entry, name) if entry else
+                    base_row(name, name == act, RATE_LIMITED, "paused after a 429"))
+        if entry and not force:
             ok = entry["row"]["status"] == OK
             age_limit = (SUCCESS_TTL if ok
                          else fail_delay(entry.get("fails", 1), entry["row"]["status"]))
             if now - entry["at"] < age_limit:
                 return served(entry, name)
 
-        known = identities.get(name)
-        usable = known["info"] if known and now - known["at"] < IDENTITY_TTL else None
-        row, fresh = fetch(name, name == act, usable)
+        row, fresh = fetch(name, name == act, identity)
         failures = 0 if row["status"] == OK else (entry or {}).get("fails", 0) + 1
         entries[name] = {"at": now, "row": row, "fails": failures}
         if fresh:
@@ -566,16 +604,12 @@ def collect():
     if hit_limit.is_set():
         cache["throttled_until"] = now + THROTTLE_SEC
     save_cache(cache)
-    _throttled_until = cache["throttled_until"]
     return rows
 
 
 def throttled_for():
     """Seconds left before the API may be called again. 0 when free."""
-    until_when = _throttled_until
-    if until_when is None:
-        until_when = load_cache()["throttled_until"]
-    return max(0, int(until_when - dt.datetime.now().timestamp()))
+    return max(0, int(load_cache()["throttled_until"] - dt.datetime.now().timestamp()))
 
 
 def active_row(rows):
@@ -593,9 +627,14 @@ def general_headroom(p):
     return 100 - max(l["percent"] for l in general)
 
 
+def seat_kind(p):
+    """"standard", "premium" or "" — the seat, normalised once."""
+    return (p.get("seat") or "").lower().replace("team_", "")
+
+
 def has_preferred_model(p):
     """Whether this seat gets the preferred model at all."""
-    return BASIC_SEAT not in (p.get("seat") or "").lower()
+    return seat_kind(p) != BASIC_SEAT
 
 
 def preferred_limit(p):
@@ -636,7 +675,7 @@ def plan_label(p):
     if not found:
         return p.get("plan") or ""
     label = found[2]
-    seat = SEAT_LABELS.get((p.get("seat") or "").replace("team_", ""), "")
+    seat = SEAT_LABELS.get(seat_kind(p), "")
     return (label + " " + seat) if seat else label
 
 
@@ -725,6 +764,12 @@ def switch_trigger(active, target, state):
     return None
 
 
+def staying(rows, plan):
+    """Is the plan to keep the account we are already on?"""
+    active = active_row(rows)
+    return bool(plan[0] and active and plan[0]["name"] == active["name"])
+
+
 def plan_switch(rows, state):
     """What the next session gets: (target, why, blocked_by).
 
@@ -737,7 +782,7 @@ def plan_switch(rows, state):
     if target is None:
         return None, "no account has headroom left", "nothing to switch to"
     if active is None or target["name"] == active["name"]:
-        return target, "already the best account available", "staying put"
+        return target, "already the best account available", None
 
     trigger = switch_trigger(active, target, state)
     why = trigger or "more headroom than the current account"
@@ -758,26 +803,29 @@ def switch(name):
 
 
 def auto_tick(rows=None):
-    """One turn of the auto loop. Returns (rows, switched, message)."""
+    """One turn of the auto loop. Returns (rows, switched, message, plan).
+
+    The plan comes back so callers can render it without working it out a
+    second time over the same rows.
+    """
     state = load_state()
     if rows is None:
         rows = collect()
-    if not state["enabled"]:
-        return rows, False, "auto-switching is off"
-
+    plan = plan_switch(rows, state)
+    target, why, blocked = plan
     active = active_row(rows)
-    target, why, blocked = plan_switch(rows, state)
-    if blocked:
-        return rows, False, blocked
+
+    if not state["enabled"] or blocked or staying(rows, plan) or target is None:
+        return rows, False, blocked or why, plan
     if not switch(target["name"]):
-        return rows, False, "`claudini use %s` failed" % target["name"]
+        return rows, False, "`claudini use %s` failed" % target["name"], plan
 
     state["last_switch"] = dt.datetime.now().timestamp()
     save_state(state)
     # Only the active account changed: no need to read everything again.
     for row in rows:
         row["active"] = (row["name"] == target["name"])
-    return rows, True, "%s -> %s (%s)" % (active["name"], target["name"], why)
+    return rows, True, "%s -> %s (%s)" % (active["name"], target["name"], why), plan
 
 
 # --- reconnecting ------------------------------------------------------------
@@ -849,15 +897,14 @@ def epoch_of(iso):
         return None
 
 
+def seconds_until_epoch(epoch):
+    """Seconds until a unix timestamp. None when there isn't one."""
+    return None if epoch is None else max(0, int(epoch - dt.datetime.now().timestamp()))
+
+
 def seconds_until(iso):
     """Seconds until an ISO date from the API. None if absent or unreadable."""
-    if not iso:
-        return None
-    try:
-        target = dt.datetime.fromisoformat(iso)
-    except ValueError:
-        return None
-    return max(0, int((target - dt.datetime.now(dt.timezone.utc)).total_seconds()))
+    return seconds_until_epoch(epoch_of(iso))
 
 
 def until(seconds):
@@ -888,13 +935,12 @@ def throttle_notice(seconds):
     return "API paused for %ds (429) — showing cached data" % seconds
 
 
-def render(rows):
+def render(rows, plan=None):
     state = load_state()
-    target, why, blocked = plan_switch(rows, state)
+    target, why, blocked = plan or plan_switch(rows, state)
     print("\033[1mmode\033[0m %s   \033[1mauto\033[0m %s   \033[1mnext\033[0m %s — %s"
           % (state["mode"], "on" if state["enabled"] else "off",
-             target["name"] if target else "?",
-             why if blocked == "staying put" else (blocked or why)))
+             target["name"] if target else "?", blocked or why))
     left = throttled_for()
     if left:
         print("\033[33m%s\033[0m" % throttle_notice(left))
@@ -906,10 +952,12 @@ def render(rows):
             head += "  ·  %s" % r["space"]
         if plan_label(r):
             head += " (%s)" % plan_label(r)
+        if r.get("source") == "local":
+            head += "  \033[2m· read from disk\033[0m\033[1m"
         print("\033[1m%s\033[0m" % head)
 
         if r["status"] != OK:
-            print("    %s" % (r.get("detail") or r["status"]))
+            print("    %s" % status_text(r))
         for lim in r["limits"]:
             pct = lim["percent"]
             print("    %-24s %s%s %3d%%\033[0m  resets in %s"
@@ -945,42 +993,55 @@ def binding_limit(p):
             "resets_at_epoch": epoch_of(worst["resets_at"])}
 
 
-def for_json(rows, state):
+def for_json(rows, state, plan=None):
     """The contract with the menu bar app.
 
-    Everything derived here is derived once: the app holds no policy and no
-    thresholds of its own. Reset times go out as absolute timestamps so the
-    app can count down from a stale snapshot without drifting.
+    Every key here is named on purpose. Spreading the internal row instead
+    published whatever the row happened to carry, which is how two derived
+    fields ended up being computed for nobody.
     """
-    target, why, blocked = plan_switch(rows, state)
+    target, why, blocked = plan or plan_switch(rows, state)
     pause = throttled_for()
-    out = []
-    for r in rows:
-        headroom = general_headroom(r)
-        out.append(dict(
-            r,
-            limits=[dict(l, resets_at_epoch=epoch_of(l["resets_at"]),
-                         short_label=SHORT_LABELS.get(l["kind"], l["label"]),
-                         level=level(l["percent"]))
-                    for l in r["limits"]],
-            headroom=headroom,
-            headroom_level=level(100 - headroom) if headroom is not None else None,
-            binding=binding_limit(r),
-            plan_label=plan_label(r),
-            saturated=saturated_models(r),
-            needs_login=needs_login(r)))
     return {
-        "profiles": out,
+        "profiles": [{
+            "name": r["name"],
+            "email": r["email"],
+            "active": r["active"],
+            "status": r["status"],
+            "detail": status_text(r),
+            "source": r.get("source"),
+            "space": r.get("space"),
+            "plan_label": plan_label(r),
+            "limit_reset": r.get("limit_reset"),
+            "needs_login": needs_login(r),
+            "binding": binding_limit(r),
+            "saturated": saturated_models(r),
+            "limits": [{
+                "kind": l["kind"],
+                "label": l["label"],
+                "short_label": SHORT_LABELS.get(l["kind"], l["label"]),
+                "percent": l["percent"],
+                "level": level(l["percent"]),
+                "resets_at_epoch": epoch_of(l["resets_at"]),
+                # The app groups on these rather than restating which kinds
+                # are general and which limit is the preferred model.
+                "general": l["kind"] in GENERAL_KINDS,
+                "preferred": l is preferred_limit(r),
+            } for l in r["limits"]],
+        } for r in rows],
         "auto": state["enabled"],
         "mode": state["mode"],
-        "modes": list(MODES),
+        "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
+        # Only meaningful while the policy is protecting that model.
+        "show_saturated": state["mode"] == MODE_MODEL,
         "throttled_for": pause,
         "throttle_notice": throttle_notice(pause) if pause else None,
-        # The app polls on this rather than hardcoding a copy of the TTL.
+        # The app polls on these rather than hardcoding a copy of the TTLs.
         "poll_after_sec": POLL_SEC,
         "stale_after_sec": SUCCESS_TTL,
         "next": {"name": target["name"] if target else None,
-                 "reason": why, "blocked_by": blocked},
+                 "reason": why, "blocked_by": blocked,
+                 "staying": staying(rows, (target, why, blocked))},
     }
 
 
@@ -1000,6 +1061,9 @@ def main():
         if len(args) > 1 and args[1] in ("on", "off"):
             state["enabled"] = args[1] == "on"
             save_state(state)
+        if "--json" in args:
+            json.dump(for_json(collect(), state), sys.stdout)
+            return
         print("auto: %s (%s mode)" % ("on" if state["enabled"] else "off", state["mode"]))
         return
 
@@ -1010,6 +1074,9 @@ def main():
                 sys.exit("mode must be one of: %s" % ", ".join(MODES))
             state["mode"] = args[1]
             save_state(state)
+        if "--json" in args:
+            json.dump(for_json(collect(), state), sys.stdout)
+            return
         print("mode: %s" % state["mode"])
         return
 
@@ -1017,15 +1084,15 @@ def main():
         print(auto_tick()[2])
         return
 
-    rows = collect()
+    rows, plan = collect("--force" in args), None
     # `--json --tick`: one API pass feeding both the auto loop and the display.
     if "--tick" in args:
-        rows = auto_tick(rows)[0]
+        rows, _, _, plan = auto_tick(rows)
 
     if "--json" in args:
-        json.dump(for_json(rows, load_state()), sys.stdout)
+        json.dump(for_json(rows, load_state(), plan), sys.stdout)
     else:
-        render(rows)
+        render(rows, plan)
 
 
 if __name__ == "__main__":

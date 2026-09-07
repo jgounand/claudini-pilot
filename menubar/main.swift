@@ -15,13 +15,15 @@ let defaultPoll: TimeInterval = 300
 // MARK: - the engine's contract
 
 struct Limit: Decodable {
-    let kind: String?
-    let label: String
     let short_label: String
     let percent: Int
     let level: String
     /// Absolute, so the countdown stays right even drawn from a stale snapshot.
     let resets_at_epoch: Int?
+    /// Which limits are the general windows, and which one is the preferred
+    /// model, is the engine's call — the app only lays them out.
+    let general: Bool
+    let preferred: Bool
 }
 
 struct Profile: Decodable {
@@ -35,8 +37,6 @@ struct Profile: Decodable {
     let needs_login: Bool
     let space: String?
     let plan_label: String?
-    let headroom: Int?
-    let headroom_level: String?
     let binding: Binding?
     let saturated: [String]
 }
@@ -48,6 +48,7 @@ struct Binding: Decodable {
     let percent: Int
     let headroom: Int
     let level: String
+    let resets_at_epoch: Int?
 }
 
 /// What the next `claude` session gets, and what stops us moving there.
@@ -55,14 +56,21 @@ struct NextUp: Decodable {
     let name: String?
     let reason: String
     let blocked_by: String?
+    let staying: Bool
+}
+
+struct Mode: Decodable {
+    let name: String
+    let title: String
 }
 
 struct Snapshot: Decodable {
     let profiles: [Profile]
     let auto: Bool
     let mode: String
-    let modes: [String]
-    let throttled_for: Int?
+    let modes: [Mode]
+    /// A spent model quota only means something while the policy protects it.
+    let show_saturated: Bool
     let throttle_notice: String?
     let poll_after_sec: Int
     let stale_after_sec: Int
@@ -89,13 +97,14 @@ func run(_ launchPath: String, _ args: [String]) -> (Int32, Data) {
     return (p.terminationStatus, out)
 }
 
+func styled(_ s: String, _ font: NSFont, _ color: NSColor) -> NSAttributedString {
+    NSAttributedString(string: s, attributes: [.font: font, .foregroundColor: color])
+}
+
 func text(_ s: String, _ size: CGFloat,
           _ weight: NSFont.Weight = .regular,
           _ color: NSColor = .labelColor) -> NSAttributedString {
-    NSAttributedString(string: s, attributes: [
-        .font: NSFont.systemFont(ofSize: size, weight: weight),
-        .foregroundColor: color,
-    ])
+    styled(s, .systemFont(ofSize: size, weight: weight), color)
 }
 
 /// Monospaced, so every row's columns land in the same place. The dropdown is
@@ -104,10 +113,7 @@ func text(_ s: String, _ size: CGFloat,
 func mono(_ s: String, _ size: CGFloat,
           _ weight: NSFont.Weight = .regular,
           _ color: NSColor = .labelColor) -> NSAttributedString {
-    NSAttributedString(string: s, attributes: [
-        .font: NSFont.monospacedSystemFont(ofSize: size, weight: weight),
-        .foregroundColor: color,
-    ])
+    styled(s, .monospacedSystemFont(ofSize: size, weight: weight), color)
 }
 
 func pad(_ s: String, _ width: Int) -> String {
@@ -121,10 +127,7 @@ func padLeft(_ s: String, _ width: Int) -> String {
 }
 
 func digits(_ s: String, _ size: CGFloat, _ color: NSColor) -> NSAttributedString {
-    NSAttributedString(string: s, attributes: [
-        .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
-        .foregroundColor: color,
-    ])
+    styled(s, .monospacedDigitSystemFont(ofSize: size, weight: .regular), color)
 }
 
 func color(_ level: String) -> NSColor {
@@ -142,15 +145,6 @@ func countdown(to epoch: Int?) -> String {
     if mins < 60 { return "\(mins)min" }
     if mins < 1440 { return String(format: "%dh%02d", mins / 60, mins % 60) }
     return "\(mins / 1440)d"
-}
-
-/// The mode names come from the engine; these are the human descriptions.
-func modeTitle(_ mode: String) -> String {
-    switch mode {
-    case "model": return "model — keep Fable available"
-    case "endurance": return "endurance — spend what resets soonest"
-    default: return mode
-    }
 }
 
 /// A ring filled to `percent`, for the menu bar. Reads at a glance at a size
@@ -183,12 +177,17 @@ func gauge(_ percent: Int, _ shade: NSColor, size: CGFloat = 13) -> NSImage {
 
 // MARK: - app
 
+/// Every call into the engine goes through here, so the interpreter and the
+/// helper path are spelled once.
+func engine(_ args: [String]) -> Data {
+    run("/usr/bin/env", ["python3", helper] + args).1
+}
+
 final class Bar: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var snapshot: Snapshot?
     var loadedAt = Date.distantPast
     var loading = false
-    var poll = defaultPoll
     var timer: Timer?
 
     override init() {
@@ -204,32 +203,32 @@ final class Bar: NSObject, NSMenuDelegate {
 
     /// The engine owns the cadence; re-arm whenever it says something else.
     func schedule(_ interval: TimeInterval) {
-        poll = interval
         timer?.invalidate()
         timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) {
             [weak self] _ in self?.reload()
         }
     }
 
-    func reload() {
+    func reload(force: Bool = false) {
         guard !loading else { return }
         loading = true
         DispatchQueue.global(qos: .utility).async {
             // --tick lets the engine act on the auto policy in the same pass.
-            let (_, data) = run("/usr/bin/env", ["python3", helper, "--json", "--tick"])
-            let snap = try? JSONDecoder().decode(Snapshot.self, from: data)
-            DispatchQueue.main.async {
-                self.loading = false
-                if let snap {
-                    self.snapshot = snap
-                    self.loadedAt = Date()
-                    if TimeInterval(snap.poll_after_sec) != self.poll {
-                        self.schedule(TimeInterval(snap.poll_after_sec))
-                    }
-                }
-                self.paint()
-            }
+            let data = engine(["--json", "--tick"] + (force ? ["--force"] : []))
+            DispatchQueue.main.async { self.apply(data) }
         }
+    }
+
+    /// Adopt a snapshot the engine just produced, whatever produced it.
+    func apply(_ data: Data) {
+        loading = false
+        if let snap = try? JSONDecoder().decode(Snapshot.self, from: data) {
+            snapshot = snap
+            loadedAt = Date()
+            let wanted = TimeInterval(snap.poll_after_sec)
+            if timer?.timeInterval != wanted { schedule(wanted) }
+        }
+        paint()
     }
 
     /// Run something slow without freezing the status item.
@@ -243,7 +242,7 @@ final class Bar: NSObject, NSMenuDelegate {
             item.button?.title = "⚠︎"
             return
         }
-        let shade = active.binding.map { color($0.level) } ?? .labelColor
+        let shade = active.binding.map { color($0.level) } ?? NSColor.labelColor
         item.button?.image = active.binding.map { gauge($0.percent, shade) }
         item.button?.imagePosition = .imageLeading
 
@@ -258,7 +257,7 @@ final class Bar: NSObject, NSMenuDelegate {
         }
         // The spent-model marker only means something while the policy is
         // protecting that model; in endurance mode it is just noise.
-        if snap.mode == "model", !active.saturated.isEmpty {
+        if snap.show_saturated, !active.saturated.isEmpty {
             title.append(text(" " + active.saturated.map { String($0.prefix(1)) }.joined(),
                               11, .bold, .systemRed))
         }
@@ -274,8 +273,11 @@ final class Bar: NSObject, NSMenuDelegate {
         rebuild(menu)
         // The open menu is drawn from the snapshot we already have; only ask
         // the engine again when that snapshot has actually gone stale.
-        let stale = TimeInterval(snapshot?.stale_after_sec ?? Int(defaultPoll))
-        if Date().timeIntervalSince(loadedAt) > stale { reload() }
+        // The poll period, not the cache TTL: the snapshot is briefly older
+        // than the TTL at the end of every cycle, and refetching then buys
+        // seconds of freshness for a whole extra sweep of the API.
+        let due = TimeInterval(snapshot?.poll_after_sec ?? Int(defaultPoll))
+        if Date().timeIntervalSince(loadedAt) > due { reload() }
     }
 
     func rebuild(_ menu: NSMenu) {
@@ -321,12 +323,12 @@ final class Bar: NSObject, NSMenuDelegate {
         // allowance that resets soonest so nothing expires unused.
         let modes = NSMenuItem(title: "Mode: \(snap.mode)", action: nil, keyEquivalent: "")
         let submenu = NSMenu()
-        for name in snap.modes {
-            let mi = NSMenuItem(title: modeTitle(name), action: #selector(setMode(_:)),
+        for mode in snap.modes {
+            let mi = NSMenuItem(title: mode.title, action: #selector(setMode(_:)),
                                 keyEquivalent: "")
             mi.target = self
-            mi.representedObject = name
-            mi.state = name == snap.mode ? .on : .off
+            mi.representedObject = mode.name
+            mi.state = mode.name == snap.mode ? .on : .off
             submenu.addItem(mi)
         }
         modes.submenu = submenu
@@ -377,13 +379,14 @@ final class Bar: NSObject, NSMenuDelegate {
         }
 
         out.append(mono("   ", 11))
-        for kind in ["session", "weekly_all"] {
-            append(slot: p.limits.first { $0.kind == kind }, to: out)
+        for limit in p.limits where limit.general {
+            append(slot: limit, to: out)
         }
-        append(slot: p.limits.first { $0.kind != "session" && $0.kind != "weekly_all" }, to: out)
+        append(slot: p.limits.first { $0.preferred }, to: out)
 
-        let session = p.limits.first { $0.kind == "session" }
-        out.append(mono(" ↻ " + pad(countdown(to: session?.resets_at_epoch), 6), 11,
+        // The countdown belongs to the window that binds, so it agrees with
+        // the percentage the menu bar shows for this account.
+        out.append(mono(" ↻ " + pad(countdown(to: p.binding?.resets_at_epoch), 6), 11,
                         .regular, .secondaryLabelColor))
         // `/limit-reset` is only open on some accounts: say which.
         out.append(p.limit_reset == true ? mono("⟲", 11, .bold, .systemTeal)
@@ -408,7 +411,7 @@ final class Bar: NSObject, NSMenuDelegate {
         guard let name = snap.next.name else {
             return text("  " + snap.next.reason, 12, .regular, .secondaryLabelColor)
         }
-        let staying = snap.profiles.first(where: { $0.active })?.name == name
+        let staying = snap.next.staying
         let out = NSMutableAttributedString(attributedString:
             text("  \(name)  ", 13, staying ? .medium : .semibold,
                  staying ? .labelColor : .systemGreen))
@@ -436,7 +439,7 @@ final class Bar: NSObject, NSMenuDelegate {
     @objc func switchTo(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         inBackground {
-            let (code, _) = run("/usr/bin/env", ["python3", helper, "--switch", name])
+            let code = run("/usr/bin/env", ["python3", helper, "--switch", name]).0
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 if code == 0 {
@@ -456,21 +459,23 @@ final class Bar: NSObject, NSMenuDelegate {
 
     @objc func setMode(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
+        // The engine answers a setting change with the new snapshot, so one
+        // interpreter start does both jobs.
         inBackground {
-            run("/usr/bin/env", ["python3", helper, "--mode", name])
-            DispatchQueue.main.async { self.reload() }
+            let data = engine(["--mode", name, "--json"])
+            DispatchQueue.main.async { self.apply(data) }
         }
     }
 
     @objc func toggleAuto() {
         let wanted = !(snapshot?.auto ?? false)
         inBackground {
-            run("/usr/bin/env", ["python3", helper, "--auto", wanted ? "on" : "off"])
-            DispatchQueue.main.async { self.reload() }
+            let data = engine(["--auto", wanted ? "on" : "off", "--json"])
+            DispatchQueue.main.async { self.apply(data) }
         }
     }
 
-    @objc func refreshNow() { reload() }
+    @objc func refreshNow() { reload(force: true) }
     @objc func quit() { NSApp.terminate(nil) }
 }
 
