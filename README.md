@@ -10,10 +10,10 @@ missing half: live usage for every profile, and a policy that picks for you.
 ```
  claudini  actif: work          auto: ACTIF        → personal
 
-  #  profil          compte                       session   semaine    Fable   reset
- ●1  work   you@example.com                 63%       72%      100%    3h47
-  2  work            work@example.com               100%       42%       70%    1h57
-  3  personal        me@example.com                 100%       16%        —    57min
+  #  profil          compte                       session   semaine    Fable   reset    ⟲
+ ●1  personal        you@example.com                 63%       72%      100%    3h47     ⟲
+  2  work            work@example.com               100%       42%       70%    1h57     ⟲
+  3  side            me@example.com                 100%       16%        —    57min
 ```
 
 ## What you get
@@ -52,6 +52,22 @@ the menu bar, or `claudini-usage --auto on`.
 > Switching profiles rewrites `~/.claude.json` and the keychain entry; a session
 > that is already up has its credentials in memory. Auto-switching decides which
 > account your *next* session gets. Relaunch `claude` for it to take effect.
+
+## `/limit-reset`
+
+Claude Code has a hidden `/limit-reset` command: it clears your 5-hour session
+window immediately so you can keep working, once a week, and the cost comes out
+of your weekly limit. It is rolled out account by account, so you have it on
+some subscriptions and not others — and there is no way to tell from inside a
+session which of your other accounts has it.
+
+Accounts where it is available are marked `⟲` in the console and the menu bar,
+and called out in `claudini-usage`. When your session window is full, that tells
+you at a glance whether switching to another account buys you a reset or just
+another wall.
+
+Availability is decided server-side; this only reports what your client was
+told. It cannot grant the command on an account that does not have it.
 
 ## Install
 

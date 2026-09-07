@@ -69,18 +69,26 @@ def save_state(state):
     os.replace(tmp, STATE_FILE)
 
 
+CACHE_VERSION = 2
+
+
 def load_cache():
+    """Cache des lectures ratées. Estampillé : une entrée d'une version
+    antérieure n'a pas les mêmes champs, on la jette."""
     try:
         with open(CACHE_FILE) as f:
-            return json.load(f)
+            data = json.load(f)
     except (OSError, json.JSONDecodeError):
         return {}
+    if data.get("version") != CACHE_VERSION:
+        return {}
+    return data.get("profiles", {})
 
 
 def save_cache(cache):
     tmp = CACHE_FILE + ".tmp"
     with open(tmp, "w") as f:
-        json.dump(cache, f)
+        json.dump({"version": CACHE_VERSION, "profiles": cache}, f)
     os.replace(tmp, CACHE_FILE)
 
 
@@ -117,14 +125,24 @@ def active_profile():
         return None
 
 
-def profile_email(name):
+# `/limit-reset` (remise à zéro de la fenêtre de 5 h, une fois par semaine) est
+# ouvert compte par compte côté serveur. Claude Code met la décision en cache
+# dans le claude.json du profil ; on la relit pour dire où la commande existe.
+LIMIT_RESET_FLAG = "tengu_nifty_lemur"
+
+
+def profile_meta(name):
+    """(email, organisation, /limit-reset dispo) — dispo vaut None si inconnu."""
     path = os.path.join(PROFILES_DIR, name, "claude.json")
     try:
         with open(path) as f:
-            acct = json.load(f).get("oauthAccount") or {}
-        return acct.get("emailAddress"), acct.get("organizationName")
+            data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return None, None
+        return None, None, None
+    acct = data.get("oauthAccount") or {}
+    flag = (data.get("cachedGrowthBookFeatures") or {}).get(LIMIT_RESET_FLAG)
+    reset = flag.get("enabled") if isinstance(flag, dict) else None
+    return acct.get("emailAddress"), acct.get("organizationName"), reset
 
 
 def profiles():
@@ -180,9 +198,9 @@ def refresh(service, creds):
 
 
 def fetch(name, is_active):
-    email, org = profile_email(name)
+    email, org, limit_reset = profile_meta(name)
     out = {"name": name, "email": email, "org": org, "active": is_active,
-           "status": "ok", "limits": []}
+           "limit_reset": limit_reset, "status": "ok", "limits": []}
 
     # Le profil actif est aussi dans l'entrée vivante de Claude Code, tenue à
     # jour en continu — on la préfère à l'instantané claudini.
@@ -393,6 +411,9 @@ def render(rows):
             color = "\033[31m" if pct >= 95 else "\033[33m" if pct >= 75 else "\033[32m"
             print("    %-24s %s%s %3d%%\033[0m  reset dans %s"
                   % (lim["label"], color, bar(pct), pct, until(lim["resets_at"])))
+        if r.get("limit_reset"):
+            print("    \033[36m/limit-reset disponible\033[0m       "
+                  "remet la fenêtre de 5 h à zéro · 1×/semaine · puise dans le quota hebdo")
         if r.get("extra_credits"):
             e = r["extra_credits"]
             print("    Crédits extra           %s / %s %s"

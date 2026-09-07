@@ -85,7 +85,7 @@ class Console:
             scr.addstr(0, 60, "→ %s" % target["name"], curses.color_pair(2))
 
         y = 2
-        scr.addstr(y, 0, "  #  profil          compte                       session   semaine    Fable   reset",
+        scr.addstr(y, 0, "  #  profil          compte                       session   semaine    Fable   reset    ⟲",
                    curses.A_DIM)
         y += 1
 
@@ -111,12 +111,14 @@ class Console:
                 scr.addstr(y, col, "%3d%%" % limit["percent"], self.pair(limit["percent"]))
             reset = next((l["resets_at"] for l in p["limits"] if l["kind"] == "session"), None)
             scr.addstr(y, 79, cu.until(reset)[:8], curses.A_DIM)
+            if p.get("limit_reset"):
+                scr.addstr(y, 88, "⟲", curses.color_pair(1))
             y += 1
 
         # pied de page
         scr.addstr(h - 2, 0, ("⏳ " if busy else "   ") + message[:w - 4], curses.A_DIM)
         scr.addstr(h - 1, 0,
-                   " a auto · r rafraîchir · 1-9 basculer · q quitter ",
+                   " a auto · r rafraîchir · 1-9 basculer · q quitter    ⟲ = /limit-reset dispo ",
                    curses.A_REVERSE)
         scr.refresh()
 

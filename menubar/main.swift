@@ -20,6 +20,7 @@ struct Profile: Decodable {
     let active: Bool
     let status: String
     let limits: [Limit]
+    let limit_reset: Bool?
 }
 
 struct Snapshot: Decodable {
@@ -248,6 +249,13 @@ final class Bar: NSObject, NSMenuDelegate {
             out.append(NSAttributedString(string: "  ↻ \(countdown(reset))", attributes: [
                 .font: NSFont.systemFont(ofSize: 11),
                 .foregroundColor: NSColor.secondaryLabelColor,
+            ]))
+        }
+        // `/limit-reset` n'est ouvert que sur certains comptes : on le signale.
+        if p.limit_reset == true {
+            out.append(NSAttributedString(string: "  ⟲", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
+                .foregroundColor: NSColor.systemTeal,
             ]))
         }
         return out
