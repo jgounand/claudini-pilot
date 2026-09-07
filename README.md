@@ -259,6 +259,18 @@ no policy of its own.
 Nothing is sent anywhere else. Credentials never leave the keychain and those
 two API calls.
 
+## Tests
+
+```sh
+python3 tests/test_policy.py
+```
+
+34 tests over the deciding half of the engine — eligibility, both modes'
+rankings, what triggers a switch and what blocks it, the retry schedules, the
+status classification, and the settings migration. They run on hand-built rows:
+no network, no keychain, no waiting. The I/O around them is exercised by using
+the tool.
+
 ## Caveats
 
 The usage endpoint is what Claude Code's own `/usage` command calls. It is not a

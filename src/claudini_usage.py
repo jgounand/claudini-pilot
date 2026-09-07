@@ -798,20 +798,29 @@ def staying(rows, plan):
     return bool(plan[0] and active and plan[0]["name"] == active["name"])
 
 
-def recovers_at(p):
-    """When this account stops being blocked — its binding window's reset."""
-    binding = binding_limit(p)
-    return binding["resets_at_epoch"] if binding else None
+def recovers_at(p, max_usage):
+    """When this account becomes usable again.
+
+    An account can be over the line on both windows at once, and clearing the
+    five-hour one then buys nothing — the weekly still blocks it. So recovery
+    is the *latest* of the resets that are actually in the way.
+    """
+    blocking = [l["resets_at"] for l in p["limits"]
+                if l["kind"] in GENERAL_KINDS and l["percent"] >= max_usage]
+    resets = [epoch_of(iso) for iso in blocking]
+    resets = [e for e in resets if e is not None]
+    return max(resets) if resets else None
 
 
-def first_to_recover(rows):
+def first_to_recover(rows, max_usage):
     """Of the accounts we can read, the one whose block lifts soonest.
 
     When nothing has room, this is the only useful thing to say: naming the
     account and the wait beats reporting that everything is full.
     """
-    waiting = [p for p in rows if p["status"] == OK and recovers_at(p)]
-    return min(waiting, key=recovers_at) if waiting else None
+    waiting = [(recovers_at(p, max_usage), p) for p in rows if p["status"] == OK]
+    waiting = [(at, p) for at, p in waiting if at]
+    return min(waiting, key=lambda pair: pair[0])[1] if waiting else None
 
 
 def ranked(rows, state):
@@ -845,14 +854,15 @@ def fleet(rows, state):
     reserve = sum(100 - l["percent"]
                   for p in readable for l in p["limits"] if l["kind"] == "weekly_all")
     spent = [p for p in readable if (worst_general(p) or 100) >= state["max_usage"]]
-    waiting = first_to_recover(spent)
+    waiting = first_to_recover(spent, state["max_usage"])
     return {
         "usable": len(usable_accounts(rows, state["max_usage"])),
         "total": len(rows),
         # In whole accounts: 191% is nearly two untouched weeks of allowance.
         "weekly_reserve": reserve,
         "next_free": ({"name": waiting["name"],
-                       "in_sec": seconds_until_epoch(recovers_at(waiting))}
+                       "in_sec": seconds_until_epoch(
+                           recovers_at(waiting, state["max_usage"]))}
                       if waiting else None),
     }
 
@@ -889,11 +899,11 @@ def plan_switch(rows, state):
     if target is None:
         # Everything is spent. The account to name is the one whose window
         # reopens first, with the wait — that is the only actionable fact.
-        waiting = first_to_recover(rows)
+        waiting = first_to_recover(rows, state["max_usage"])
         if waiting:
             return (waiting,
                     "everything is spent — first to free up, in %s"
-                    % until(seconds_until_epoch(recovers_at(waiting))),
+                    % until(seconds_until_epoch(recovers_at(waiting, state["max_usage"]))),
                     "waiting for a reset")
         return None, "no account can be read right now", "nothing to switch to"
     if active is None or target["name"] == active["name"]:
