@@ -136,7 +136,7 @@ DEFAULT_STATE = {
     "last_switch": 0,
 }
 
-CACHE_VERSION = 4
+CACHE_VERSION = 5
 EMPTY_CACHE = {"profiles": {}, "identity": {}, "throttled_until": 0}
 
 
@@ -358,12 +358,56 @@ def fetch_identity(token):
     # "<email>'s Organization" is the personal space, not a real workspace.
     personal = bool(org and email and org.startswith(email))
     return {
+        "account_uuid": acct.get("account_uuid"),
         "email": email,
         "space": "personal" if personal else org,
         "plan": (acct.get("organization_type") or "").replace("claude_", ""),
         "tier": acct.get("organization_rate_limit_tier"),
         "seat": acct.get("seat_tier"),
     }
+
+
+# Claude Code caches the usage response it gets into the profile's claude.json
+# while it runs, so for the account you are actually working on the numbers are
+# already on disk, fresher than anything we would poll for. They are only
+# trustworthy for the *active* profile: switching copies the running session's
+# file into the outgoing profile, so an idle profile's copy usually belongs to
+# whichever account was live at the time. The account uuid is checked anyway.
+LOCAL_USAGE_TTL = 10 * 60
+
+
+def local_usage(name, expected_uuid):
+    """The usage Claude Code already fetched for this profile, or None."""
+    cached = _read_json(profile_config(name), {}).get("cachedUsageUtilization") or {}
+    if not expected_uuid or cached.get("accountUuid") != expected_uuid:
+        return None
+    age = dt.datetime.now().timestamp() - cached.get("fetchedAtMs", 0) / 1000
+    if age > LOCAL_USAGE_TTL:
+        return None
+    return cached.get("utilization")
+
+
+def parse_usage(out, data):
+    """Fill a row from a usage payload — the API and the local copy share it."""
+    for lim in data.get("limits") or []:
+        scope = (lim.get("scope") or {}).get("model") or {}
+        out["limits"].append({
+            "kind": lim.get("kind"),
+            # `model` is what the policy keys on; `label` is for humans only.
+            "model": scope.get("id") or scope.get("display_name"),
+            "label": scope.get("display_name") or LIMIT_LABELS.get(lim.get("kind"),
+                                                                   lim.get("kind")),
+            "percent": lim.get("percent") or 0,
+            "resets_at": lim.get("resets_at"),
+        })
+    extra = data.get("extra_usage") or {}
+    if extra.get("is_enabled"):
+        out["extra_credits"] = {
+            "used": extra.get("used_credits"),
+            "limit": extra.get("monthly_limit"),
+            "currency": extra.get("currency"),
+        }
+    return out
 
 
 def base_row(name, is_active, status=OK, detail=None):
@@ -393,6 +437,14 @@ def fetch(name, is_active, identity=None):
     should store.
     """
     out = base_row(name, is_active)
+    out["source"] = "api"
+
+    if is_active and identity:
+        local = local_usage(name, identity.get("account_uuid"))
+        if local is not None:
+            out.update(identity)
+            out["source"] = "local"
+            return parse_usage(out, local), None
 
     # The active profile also lives in Claude Code's own keychain slot, kept
     # current continuously — prefer it over claudini's snapshot.
@@ -446,26 +498,7 @@ def fetch(name, is_active, identity=None):
     if identity:
         out.update(identity)
 
-    for lim in data.get("limits") or []:
-        scope = (lim.get("scope") or {}).get("model") or {}
-        out["limits"].append({
-            "kind": lim.get("kind"),
-            # `model` is what the policy keys on; `label` is for humans only.
-            "model": scope.get("id") or scope.get("display_name"),
-            "label": scope.get("display_name") or LIMIT_LABELS.get(lim.get("kind"),
-                                                                   lim.get("kind")),
-            "percent": lim.get("percent") or 0,
-            "resets_at": lim.get("resets_at"),
-        })
-
-    extra = data.get("extra_usage") or {}
-    if extra.get("is_enabled"):
-        out["extra_credits"] = {
-            "used": extra.get("used_credits"),
-            "limit": extra.get("monthly_limit"),
-            "currency": extra.get("currency"),
-        }
-    return out, fresh_identity
+    return parse_usage(out, data), fresh_identity
 
 
 def fail_delay(failures, status=None):

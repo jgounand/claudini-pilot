@@ -211,7 +211,17 @@ service `claudini-profile-<name>`. This reads them, refreshes any expired access
 token (writing the rotated token back), and asks two endpoints what it needs:
 
 - `GET /api/oauth/usage` — the limits, the same numbers Claude Code's own
-  `/usage` shows.
+  `/usage` shows. **For the account you are actively working on this is often
+  not requested at all**: Claude Code caches the response it gets into that
+  profile's `claude.json` while it runs, so the numbers are already on disk and
+  fresher than anything we would poll for. That copy is used when it is under
+  ten minutes old and its account uuid matches the profile.
+
+  Only for the *active* profile, deliberately. Switching profiles copies the
+  running session's `claude.json` into the outgoing profile, so an idle
+  profile's cached usage usually belongs to whichever account was live at the
+  time — on this machine four profiles out of five carried a fifth one's
+  numbers. The uuid is checked regardless.
 - `POST https://platform.claude.com/v1/oauth/token` — refreshing an expired
   access token. Note the host: it is not the API host, and it sits behind
   Cloudflare, which answers a request with no `User-Agent` with `error code:
