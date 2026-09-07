@@ -37,7 +37,17 @@ struct Profile: Decodable {
     let plan_label: String?
     let headroom: Int?
     let headroom_level: String?
+    let binding: Binding?
     let saturated: [String]
+}
+
+/// The general window that will stop you first — which one it is changes
+/// through the day, so the engine names it rather than the app assuming.
+struct Binding: Decodable {
+    let label: String
+    let percent: Int
+    let headroom: Int
+    let level: String
 }
 
 /// What the next `claude` session gets, and what stops us moving there.
@@ -88,6 +98,28 @@ func text(_ s: String, _ size: CGFloat,
     ])
 }
 
+/// Monospaced, so every row's columns land in the same place. The dropdown is
+/// a table; letting proportional text shuffle the numbers is what made it
+/// unreadable at a glance.
+func mono(_ s: String, _ size: CGFloat,
+          _ weight: NSFont.Weight = .regular,
+          _ color: NSColor = .labelColor) -> NSAttributedString {
+    NSAttributedString(string: s, attributes: [
+        .font: NSFont.monospacedSystemFont(ofSize: size, weight: weight),
+        .foregroundColor: color,
+    ])
+}
+
+func pad(_ s: String, _ width: Int) -> String {
+    s.count >= width ? String(s.prefix(width))
+                     : s + String(repeating: " ", count: width - s.count)
+}
+
+func padLeft(_ s: String, _ width: Int) -> String {
+    s.count >= width ? String(s.prefix(width))
+                     : String(repeating: " ", count: width - s.count) + s
+}
+
 func digits(_ s: String, _ size: CGFloat, _ color: NSColor) -> NSAttributedString {
     NSAttributedString(string: s, attributes: [
         .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
@@ -119,6 +151,34 @@ func modeTitle(_ mode: String) -> String {
     case "endurance": return "endurance — spend what resets soonest"
     default: return mode
     }
+}
+
+/// A ring filled to `percent`, for the menu bar. Reads at a glance at a size
+/// where three of them would be unreadable.
+func gauge(_ percent: Int, _ shade: NSColor, size: CGFloat = 13) -> NSImage {
+    let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
+        let width: CGFloat = 2.5
+        let inset = rect.insetBy(dx: width / 2, dy: width / 2)
+        let centre = NSPoint(x: rect.midX, y: rect.midY)
+        let radius = inset.width / 2
+
+        let track = NSBezierPath(ovalIn: inset)
+        track.lineWidth = width
+        shade.withAlphaComponent(0.25).setStroke()
+        track.stroke()
+
+        let filled = NSBezierPath()
+        filled.appendArc(withCenter: centre, radius: radius, startAngle: 90,
+                         endAngle: 90 - 3.6 * CGFloat(min(100, max(0, percent))),
+                         clockwise: true)
+        filled.lineWidth = width
+        filled.lineCapStyle = .round
+        shade.setStroke()
+        filled.stroke()
+        return true
+    }
+    image.isTemplate = false
+    return image
 }
 
 // MARK: - app
@@ -179,17 +239,28 @@ final class Bar: NSObject, NSMenuDelegate {
 
     func paint() {
         guard let snap = snapshot, let active = snap.profiles.first(where: { $0.active }) else {
+            item.button?.image = nil
             item.button?.title = "⚠︎"
             return
         }
+        let shade = active.binding.map { color($0.level) } ?? .labelColor
+        item.button?.image = active.binding.map { gauge($0.percent, shade) }
+        item.button?.imagePosition = .imageLeading
+
+        // Name the window that is actually closest, because which one binds
+        // changes through the day: the 5-hour early on, the weekly by Friday.
         let title = NSMutableAttributedString(attributedString:
-            text(active.name + " ", 12, .medium))
-        title.append(digits(active.headroom.map { "\($0)%" } ?? "?", 12,
-                            active.headroom_level.map(color) ?? .labelColor))
-        // A spent model quota is invisible in the headroom number: flag it.
-        if !active.saturated.isEmpty {
-            let initials = active.saturated.map { String($0.prefix(1)) }.joined()
-            title.append(text(" " + initials, 11, .bold, .systemRed))
+            text(" " + active.name + " ", 12, .medium))
+        if let binding = active.binding {
+            title.append(digits("\(binding.label) \(binding.headroom)%", 12, shade))
+        } else {
+            title.append(text("?", 12))
+        }
+        // The spent-model marker only means something while the policy is
+        // protecting that model; in endurance mode it is just noise.
+        if snap.mode == "model", !active.saturated.isEmpty {
+            title.append(text(" " + active.saturated.map { String($0.prefix(1)) }.joined(),
+                              11, .bold, .systemRed))
         }
         if snap.auto {
             title.append(text(" ⟳", 11, .bold, .controlAccentColor))
@@ -285,38 +356,50 @@ final class Bar: NSObject, NSMenuDelegate {
         ]))
     }
 
+    /// One profile as two aligned lines: who it is, then its numbers in fixed
+    /// columns so the eye can compare rows without reading them.
     func row(_ p: Profile) -> NSAttributedString {
         let out = NSMutableAttributedString()
-        out.append(text("\(p.active ? "●" : "○") \(p.name)", 13, p.active ? .bold : .regular))
+        out.append(mono("\(p.active ? "●" : "○") \(pad(p.name, 16))", 12,
+                        p.active ? .bold : .regular))
 
         // Two profiles can share one email in different workspaces, so the
         // workspace and plan are what actually tell them apart.
-        var who = "  \(p.email ?? "?")"
-        if let space = p.space { who += "  ·  \(space)" }
-        if let plan = p.plan_label, !plan.isEmpty { who += " (\(plan))" }
-        out.append(text(who + "\n", 11, .regular, .secondaryLabelColor))
+        var who = p.space ?? (p.email ?? "?")
+        if let plan = p.plan_label, !plan.isEmpty { who += "  ·  \(plan)" }
+        out.append(mono(who + "\n", 11, .regular, .secondaryLabelColor))
 
         guard !p.limits.isEmpty else {
             var hint = p.detail ?? p.status
             if p.needs_login { hint += " — click to log in" }
-            out.append(text("     " + hint, 11, .regular, .systemRed))
+            out.append(mono("   " + hint, 11, .regular, .systemRed))
             return out
         }
 
-        out.append(text("     ", 11))
-        for (i, l) in p.limits.enumerated() {
-            if i > 0 { out.append(text(" · ", 11, .regular, .tertiaryLabelColor)) }
-            out.append(digits("\(l.short_label) \(l.percent)%", 11, color(l.level)))
+        out.append(mono("   ", 11))
+        for kind in ["session", "weekly_all"] {
+            append(slot: p.limits.first { $0.kind == kind }, to: out)
         }
-        if let session = p.limits.first(where: { $0.kind == "session" }) {
-            out.append(text("  ↻ \(countdown(to: session.resets_at_epoch))", 11,
-                            .regular, .secondaryLabelColor))
-        }
+        append(slot: p.limits.first { $0.kind != "session" && $0.kind != "weekly_all" }, to: out)
+
+        let session = p.limits.first { $0.kind == "session" }
+        out.append(mono(" ↻ " + pad(countdown(to: session?.resets_at_epoch), 6), 11,
+                        .regular, .secondaryLabelColor))
         // `/limit-reset` is only open on some accounts: say which.
-        if p.limit_reset == true {
-            out.append(text("  ⟲", 11, .bold, .systemTeal))
-        }
+        out.append(p.limit_reset == true ? mono("⟲", 11, .bold, .systemTeal)
+                                         : mono(" ", 11))
         return out
+    }
+
+    /// One fixed-width cell, blank when the account reports no such limit, so
+    /// a missing model quota leaves a gap instead of shifting the row.
+    private func append(slot limit: Limit?, to out: NSMutableAttributedString) {
+        guard let limit else {
+            out.append(mono(String(repeating: " ", count: 12), 11))
+            return
+        }
+        out.append(mono(pad(limit.short_label, 6), 11, .regular, .secondaryLabelColor))
+        out.append(mono(padLeft("\(limit.percent)%", 5) + " ", 11, .medium, color(limit.level)))
     }
 
     /// The engine already decided where the next session goes and why; this

@@ -928,6 +928,23 @@ def render(rows):
 SHORT_LABELS = {"session": "5h", "weekly_all": "7d"}
 
 
+def binding_limit(p):
+    """The general window that will stop you first — the one worth showing.
+
+    Which one it is changes through the day: the 5-hour window is usually the
+    binding one, but late in the week the weekly window takes over.
+    """
+    general = [l for l in p["limits"] if l["kind"] in GENERAL_KINDS]
+    if not general:
+        return None
+    worst = max(general, key=lambda l: l["percent"])
+    return {"label": SHORT_LABELS.get(worst["kind"], worst["label"]),
+            "percent": worst["percent"],
+            "headroom": 100 - worst["percent"],
+            "level": level(worst["percent"]),
+            "resets_at_epoch": epoch_of(worst["resets_at"])}
+
+
 def for_json(rows, state):
     """The contract with the menu bar app.
 
@@ -948,6 +965,7 @@ def for_json(rows, state):
                     for l in r["limits"]],
             headroom=headroom,
             headroom_level=level(100 - headroom) if headroom is not None else None,
+            binding=binding_limit(r),
             plan_label=plan_label(r),
             saturated=saturated_models(r),
             needs_login=needs_login(r)))
