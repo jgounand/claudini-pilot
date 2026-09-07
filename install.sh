@@ -21,13 +21,13 @@ echo "commandes  -> $BIN/claudini-usage, $BIN/claudini-auto"
 
 if command -v swiftc >/dev/null; then
   BUILD="$(mktemp -d)"
+  trap 'rm -rf "$BUILD"' EXIT      # a failed compile used to leave it behind
   swiftc -O -o "$BUILD/ClaudiniBar" "$REPO/menubar/main.swift" -framework AppKit
   pkill -f "ClaudiniBar.app" 2>/dev/null || true
   mkdir -p "$APP/Contents/MacOS"
   cp "$BUILD/ClaudiniBar" "$APP/Contents/MacOS/ClaudiniBar"
   cp "$REPO/menubar/Info.plist" "$APP/Contents/Info.plist"
   codesign --force --sign - "$APP" >/dev/null 2>&1 || true
-  rm -rf "$BUILD"
   echo "menu bar   -> $APP"
   open "$APP"
 else

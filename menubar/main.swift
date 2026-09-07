@@ -187,11 +187,20 @@ func engine(_ args: [String]) -> Data {
     run("/usr/bin/env", ["python3", helper] + args).1
 }
 
+/// One engine process at a time, for the whole app.
+///
+/// Each of these can switch accounts or rewrite settings, and letting two run
+/// at once is how a click lands in the middle of an automatic tick — the
+/// interleaving that can overwrite one account's stored credentials with
+/// another's. A serial queue costs nothing here: none of it is fast enough to
+/// want overlapping anyway.
+let engineQueue = DispatchQueue(label: "claudini-pilot.engine")
+
 final class Bar: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var snapshot: Snapshot?
     var loadedAt = Date.distantPast
-    var loading = false
+    var busy = false
     var timer: Timer?
 
     override init() {
@@ -214,30 +223,39 @@ final class Bar: NSObject, NSMenuDelegate {
     }
 
     func reload(force: Bool = false) {
-        guard !loading else { return }
-        loading = true
-        DispatchQueue.global(qos: .utility).async {
-            // --tick lets the engine act on the auto policy in the same pass.
-            let data = engine(["--json", "--tick"] + (force ? ["--force"] : []))
-            DispatchQueue.main.async { self.apply(data) }
+        ask(["--json", "--tick"] + (force ? ["--force"] : []))
+    }
+
+    /// Run one engine call and adopt whatever snapshot comes back.
+    func ask(_ args: [String]) {
+        guard !busy else { return }
+        busy = true
+        engineQueue.async {
+            let data = engine(args)
+            DispatchQueue.main.async {
+                self.busy = false
+                self.apply(data)
+            }
         }
     }
 
     /// Adopt a snapshot the engine just produced, whatever produced it.
     func apply(_ data: Data) {
-        loading = false
-        if let snap = try? JSONDecoder().decode(Snapshot.self, from: data) {
-            snapshot = snap
-            loadedAt = Date()
-            let wanted = TimeInterval(snap.poll_after_sec)
-            if timer?.timeInterval != wanted { schedule(wanted) }
+        guard let snap = try? JSONDecoder().decode(Snapshot.self, from: data) else {
+            paint()
+            return
         }
+        snapshot = snap
+        loadedAt = Date()
+        let wanted = TimeInterval(snap.poll_after_sec)
+        if timer?.timeInterval != wanted { schedule(wanted) }
         paint()
     }
 
-    /// Run something slow without freezing the status item.
+    /// Run something slow without freezing the status item, on the same serial
+    /// queue as everything else that touches the engine.
     func inBackground(_ work: @escaping () -> Void) {
-        DispatchQueue.global(qos: .userInitiated).async(execute: work)
+        engineQueue.async(execute: work)
     }
 
     func paint() {
@@ -488,18 +506,12 @@ final class Bar: NSObject, NSMenuDelegate {
         guard let name = sender.representedObject as? String else { return }
         // The engine answers a setting change with the new snapshot, so one
         // interpreter start does both jobs.
-        inBackground {
-            let data = engine(["--mode", name, "--json"])
-            DispatchQueue.main.async { self.apply(data) }
-        }
+        ask(["--mode", name, "--json"])
     }
 
     @objc func toggleAuto() {
         let wanted = !(snapshot?.auto ?? false)
-        inBackground {
-            let data = engine(["--auto", wanted ? "on" : "off", "--json"])
-            DispatchQueue.main.async { self.apply(data) }
-        }
+        ask(["--auto", wanted ? "on" : "off", "--json"])
     }
 
     @objc func refreshNow() { reload(force: true) }

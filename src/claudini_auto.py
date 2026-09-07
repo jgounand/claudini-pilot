@@ -84,9 +84,20 @@ class Console:
             if self.busy:
                 return          # a pass is already in flight; don't stack them
             self.busy = True
+        try:
+            self._read(run_auto, force)
+        finally:
+            # Released whatever happens: a pass that raised used to leave this
+            # set for good, and every later refresh — the loop's and yours —
+            # returned at the check above. The console then sat on stale
+            # numbers looking alive.
+            with self.lock:
+                self.busy = False
+                self.version += 1
+
+    def _read(self, run_auto, force):
         state = cu.load_state()
         rows = cu.collect(force)
-        message = ""
         plan, message = None, ""
         if run_auto:
             rows, moved, message, plan = cu.auto_tick(rows)
@@ -97,12 +108,13 @@ class Console:
         plan = plan or cu.plan_switch(rows, state)
         summary = cu.fleet_line(cu.fleet(rows, state))
         rows = cu.ranked(rows, state)
+        # Re-read: a keypress during the pass above changed the settings, and
+        # writing back the snapshot we started with would undo it on screen.
+        state = cu.load_state()
         with self.lock:
             self.rows, self.state, self.plan, self.fleet = rows, state, plan, summary
             self.message = (cu.throttle_notice(throttled) if throttled
                             else message or time.strftime("updated at %H:%M:%S"))
-            self.busy = False
-            self.version += 1
 
     def spawn(self, run_auto=True, force=False):
         threading.Thread(target=self.refresh, args=(run_auto, force), daemon=True).start()
@@ -258,9 +270,7 @@ class Console:
         self.spawn(run_auto=False)
 
     def toggle_auto(self):
-        state = cu.load_state()
-        state["enabled"] = not state["enabled"]
-        cu.save_state(state)
+        state = cu.update_state(enabled=not cu.load_state()["enabled"])
         with self.lock:
             self.state = state
             self.message = "auto-switching %s" % ("on" if state["enabled"] else "off")
@@ -268,10 +278,8 @@ class Console:
             self.spawn()
 
     def cycle_mode(self):
-        state = cu.load_state()
-        following = (cu.MODES.index(state["mode"]) + 1) % len(cu.MODES)
-        state["mode"] = cu.MODES[following]
-        cu.save_state(state)
+        following = (cu.MODES.index(cu.load_state()["mode"]) + 1) % len(cu.MODES)
+        state = cu.update_state(mode=cu.MODES[following])
         with self.lock:
             self.state = state
             self.plan = cu.plan_switch(self.rows, state)

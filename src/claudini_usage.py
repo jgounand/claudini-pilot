@@ -51,27 +51,41 @@ BETA = "oauth-2025-04-20"
 USER_AGENT = "claudini-pilot/1.0 (+https://github.com/jgounand/claudini-pilot)"
 
 ACCOUNT = getpass.getuser()
-REFRESH_LOCKS = collections.defaultdict(threading.Lock)
+LOCKS = collections.defaultdict(threading.Lock)
+
+
+def lock_path(name):
+    return os.path.join(CLAUDINI_HOME, "%s.lock" % name)
 
 
 @contextlib.contextmanager
-def refresh_guard(name):
-    """Serialise token refreshes across processes, not merely across threads.
+def guard(name):
+    """An exclusive lock held across processes, not merely across threads.
 
-    The refresh token rotates on every use, and the console, the menu bar and
-    a one-off CLI run are three separate processes. Two of them refreshing the
-    same profile at once means the loser presents a token the winner already
-    consumed — which comes back as a dead credential on a perfectly good
-    account. The guard is per profile: two different accounts refreshing at
-    once contend for nothing.
+    The console, the menu bar and a one-off CLI run are three processes over
+    one set of files and keychain entries, so a threading.Lock protects
+    nothing. The lock file is never unlinked on purpose: removing it while
+    another process holds a handle on that inode lets a third create a fresh
+    one and lock a different file, so two holders think they are alone.
+
+    Re-taking the *same* guard would deadlock — flock blocks a second
+    acquisition even from the same process. Different guards may nest, always
+    in the order switch → cache → state, never the reverse.
     """
-    with REFRESH_LOCKS[name]:
-        with open(os.path.join(CLAUDINI_HOME, "refresh-%s.lock" % name), "w") as handle:
+    os.makedirs(CLAUDINI_HOME, exist_ok=True)
+    with LOCKS[name]:
+        with open(lock_path(name), "a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+def refresh_guard(name):
+    """One refresh at a time per profile — the token rotates on every use, so
+    the loser of a race presents one the winner already spent."""
+    return guard("refresh-" + name)
 
 # The model worth protecting: its dedicated weekly quota runs out long before
 # the general limits do.
@@ -187,12 +201,26 @@ def needs_login(row):
 # --- files -------------------------------------------------------------------
 
 def _write_json(path, data, indent=None):
-    """Atomic write: never leave a half-written file behind."""
+    """Atomic write: never leave a half-written file behind.
+
+    The staging file is named per writer. Three processes share these files,
+    and a fixed ".tmp" name meant two of them streamed JSON into one buffer
+    and installed the splice — after which load_cache sees invalid JSON,
+    silently discards everything, and every profile is refetched at once,
+    which is precisely what earns the 429 the cache exists to avoid.
+    """
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(data, f, indent=indent)
-    os.replace(tmp, path)
+    handle, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                                   prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(handle, "w") as f:
+            json.dump(data, f, indent=indent)
+            f.flush()
+            os.fsync(f.fileno())     # a crash here would otherwise install an empty file
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
 
 
 def _read_json(path, default):
@@ -228,6 +256,55 @@ def load_cache():
 
 def save_cache(cache):
     _write_json(CACHE_FILE, dict(cache, version=CACHE_VERSION))
+
+
+def merge_cache(mine):
+    """Fold a finished pass into whatever is on disk now.
+
+    A pass holds its copy across seconds of HTTP, so plainly saving it
+    overwrites anything another process learned meanwhile. The worst loss was
+    `throttled_until`: erasing another process's 429 back-off makes both keep
+    calling through the pause the API asked for, which is self-reinforcing.
+    A login could be lost the same way — reconnect() drops the stale entry so
+    the fresh credentials are picked up, and an in-flight pass put it back.
+    """
+    with guard("cache"):
+        disk = load_cache()
+        for name, entry in mine["profiles"].items():
+            known = disk["profiles"].get(name)
+            if not known or entry["at"] >= known["at"]:
+                disk["profiles"][name] = entry
+        for name, entry in mine["identity"].items():
+            known = disk["identity"].get(name)
+            if not known or entry["at"] >= known["at"]:
+                disk["identity"][name] = entry
+        disk["throttled_until"] = max(disk["throttled_until"], mine["throttled_until"])
+        save_cache(disk)
+        return disk
+
+
+def forget(name):
+    """Drop what we know about a profile, without clobbering the rest."""
+    with guard("cache"):
+        disk = load_cache()
+        disk["profiles"].pop(name, None)
+        disk["identity"].pop(name, None)
+        save_cache(disk)
+
+
+def update_state(**changes):
+    """Change settings without reverting anything written meanwhile.
+
+    Every writer used to load, modify and save the whole file. A tick holding
+    a snapshot across a network pass would write back the state from before
+    your keypress — turning auto-switching back on by itself — or drop the
+    `last_switch` a concurrent tick had just recorded, erasing the cooldown.
+    """
+    with guard("state"):
+        state = load_state()
+        state.update(changes)
+        save_state(state)
+        return state
 
 
 # --- keychain ----------------------------------------------------------------
@@ -385,13 +462,18 @@ def refresh(name, service, creds):
         except Exception as e:
             return None, UNREACHABLE, "refresh endpoint unreachable (%s)" % type(e).__name__
 
-    oauth["accessToken"] = new["access_token"]
-    if new.get("refresh_token"):
-        oauth["refreshToken"] = new["refresh_token"]
-    if new.get("expires_in"):
-        oauth["expiresAt"] = int((dt.datetime.now().timestamp() + new["expires_in"]) * 1000)
-    keychain_write(service, creds)
-    return oauth["accessToken"], None, None
+        # Still inside the guard. The check above is the whole safety
+        # mechanism, and it reads the keychain — so the winner must have
+        # written before the next contender looks, or the loser presents a
+        # token the server has already rotated and reads a healthy account
+        # as needing a login.
+        oauth["accessToken"] = new["access_token"]
+        if new.get("refresh_token"):
+            oauth["refreshToken"] = new["refresh_token"]
+        if new.get("expires_in"):
+            oauth["expiresAt"] = int((dt.datetime.now().timestamp() + new["expires_in"]) * 1000)
+        keychain_write(service, creds)
+        return oauth["accessToken"], None, None
 
 
 def fetch_identity(token):
@@ -615,7 +697,7 @@ def collect(force=False):
     # pause would extend it forever.
     if hit_limit.is_set():
         cache["throttled_until"] = now + THROTTLE_SEC
-    save_cache(cache)
+    merge_cache(cache)
     return rows
 
 
@@ -939,11 +1021,16 @@ def _point_at(name):
     if os.path.exists(CLAUDE_JSON) and not os.path.islink(CLAUDE_JSON):
         raise RuntimeError("%s is a real file, not a profile link — refusing to "
                            "replace it" % CLAUDE_JSON)
-    staging = CLAUDE_JSON + ".switching"
-    if os.path.islink(staging):
-        os.unlink(staging)
-    os.symlink(profile_config(name), staging)
-    os.replace(staging, CLAUDE_JSON)
+    staging = "%s.switching.%d" % (CLAUDE_JSON, os.getpid())
+    with contextlib.suppress(OSError):
+        os.unlink(staging)           # a previous run of *this* pid, or a crash
+    try:
+        os.symlink(profile_config(name), staging)
+        os.replace(staging, CLAUDE_JSON)
+    except OSError:
+        with contextlib.suppress(OSError):
+            os.unlink(staging)
+        raise
 
 
 def switch(name):
@@ -952,9 +1039,20 @@ def switch(name):
     The outgoing profile's credentials are saved first: Claude Code refreshes
     the live slot as it runs, so the copy sitting in the profile is behind by
     however long that profile was active.
+
+    Held under a lock, and the current profile and live credentials are read
+    inside it. Two switches overlapping — a click landing on an automatic
+    tick — otherwise let the second one save the *incoming* account's
+    credentials over the outgoing profile's, destroying a refresh token that
+    exists nowhere else.
     """
     if name not in profiles():
         return False
+    with guard("switch"):
+        return _switch_locked(name)
+
+
+def _switch_locked(name):
     current = active_profile()
     if current == name:
         return True
@@ -982,6 +1080,11 @@ def switch(name):
 
 def add_profile(name):
     """Save the credentials in use right now as a new profile."""
+    with guard("switch"):
+        return _add_locked(name)
+
+
+def _add_locked(name):
     if name in profiles():
         raise ValueError("profile %r already exists" % name)
     live = keychain_read(LIVE_SERVICE)
@@ -992,6 +1095,11 @@ def add_profile(name):
 
 
 def rename_profile(old, new):
+    with guard("switch"):
+        return _rename_locked(old, new)
+
+
+def _rename_locked(old, new):
     if old not in profiles():
         raise ValueError("no profile named %r" % old)
     if new in profiles():
@@ -1001,6 +1109,8 @@ def rename_profile(old, new):
         keychain_write(profile_service(new), credentials)
         keychain_delete(profile_service(old))
     os.rename(os.path.dirname(profile_config(old)), os.path.dirname(profile_config(new)))
+    with contextlib.suppress(OSError):
+        os.unlink(lock_path("refresh-" + old))
     _CONFIG_CACHE.clear()
     if active_profile() == old:
         _point_at(new)
@@ -1008,16 +1118,21 @@ def rename_profile(old, new):
 
 
 def remove_profile(name):
+    with guard("switch"):
+        return _remove_locked(name)
+
+
+def _remove_locked(name):
     if name not in profiles():
         raise ValueError("no profile named %r" % name)
     if active_profile() == name:
         raise ValueError("%r is in use — switch away from it first" % name)
     keychain_delete(profile_service(name))
     shutil.rmtree(os.path.dirname(profile_config(name)), ignore_errors=True)
-    cache = load_cache()
-    cache["profiles"].pop(name, None)
-    cache["identity"].pop(name, None)
-    save_cache(cache)
+    with contextlib.suppress(OSError):
+        os.unlink(lock_path("refresh-" + name))
+    _CONFIG_CACHE.clear()
+    forget(name)
 
 
 def auto_tick(rows=None):
@@ -1038,8 +1153,7 @@ def auto_tick(rows=None):
     if not switch(target["name"]):
         return rows, False, "`claudini use %s` failed" % target["name"], plan
 
-    state["last_switch"] = dt.datetime.now().timestamp()
-    save_state(state)
+    update_state(last_switch=dt.datetime.now().timestamp())
     # Only the active account changed: no need to read everything again.
     for row in rows:
         row["active"] = (row["name"] == target["name"])
@@ -1071,9 +1185,7 @@ def reconnect(name):
         if not created:
             print("\033[31mLogin did not complete: no credentials were created.\033[0m")
             return
-        service = created.pop()
-        creds = keychain_read(service)
-        keychain_delete(service)
+        creds = keychain_read(sorted(created)[0])
 
         if not creds or "claudeAiOauth" not in creds:
             print("\033[31mCredentials unreadable after the login.\033[0m")
@@ -1095,11 +1207,15 @@ def reconnect(name):
             _write_json(profile_config(name), config, indent=2)
         print("\033[32m%s reconnected%s.\033[0m" % (name, " (%s)" % got if got else ""))
     finally:
+        # The throwaway config dir gets its own keychain entry holding a real,
+        # working refresh token. Removing it mid-body left it behind on every
+        # path that returned early, and a stranded credential is invisible —
+        # nobody would ever notice. Every entry this login created goes, not
+        # just the first one found.
+        for stray in claude_credential_services() - before:
+            keychain_delete(stray)
         shutil.rmtree(workdir, ignore_errors=True)
-        cache = load_cache()
-        cache["profiles"].pop(name, None)
-        cache["identity"].pop(name, None)
-        save_cache(cache)
+        forget(name)
 
 
 # --- rendering ---------------------------------------------------------------
@@ -1296,8 +1412,7 @@ def main():
     if command == "--auto":                      # --auto on | off | status
         state = load_state()
         if len(args) > 1 and args[1] in ("on", "off"):
-            state["enabled"] = args[1] == "on"
-            save_state(state)
+            state = update_state(enabled=args[1] == "on")
         if "--json" in args:
             json.dump(for_json(collect(), state), sys.stdout)
             return
@@ -1309,8 +1424,7 @@ def main():
         if len(args) > 1:
             if args[1] not in MODES:
                 sys.exit("mode must be one of: %s" % ", ".join(MODES))
-            state["mode"] = args[1]
-            save_state(state)
+            state = update_state(mode=args[1])
         if "--json" in args:
             json.dump(for_json(collect(), state), sys.stdout)
             return
