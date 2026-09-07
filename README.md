@@ -1,4 +1,4 @@
-# claudini-console
+# claudini-pilot
 
 See how much is left on each of your Claude subscriptions, and switch between
 them from the menu bar, a terminal UI, or automatically.
@@ -121,8 +121,8 @@ Requires macOS, [claudini](https://github.com/kimrgrey/claudini), Python 3.9+,
 and Xcode Command Line Tools for the menu bar app.
 
 ```sh
-git clone https://github.com/jgounand/claudini-console.git
-cd claudini-console
+git clone https://github.com/jgounand/claudini-pilot.git
+cd claudini-pilot
 ./install.sh
 ```
 
