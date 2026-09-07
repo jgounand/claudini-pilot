@@ -57,6 +57,9 @@ struct NextUp: Decodable {
     let reason: String
     let blocked_by: String?
     let staying: Bool
+    /// Where you would go if this account ran out — so the line says something
+    /// even when nothing is about to change.
+    let after: String?
 }
 
 struct Mode: Decodable {
@@ -297,7 +300,7 @@ final class Bar: NSObject, NSMenuDelegate {
         menu.addItem(readonly(nextLine(snap)))
 
         menu.addItem(.separator())
-        menu.addItem(heading("Switch to"))
+        menu.addItem(heading("Switch to · best first"))
         for p in snap.profiles where !p.active {
             let mi = NSMenuItem(title: p.name,
                                 action: p.needs_login ? #selector(reconnect(_:))
@@ -423,6 +426,10 @@ final class Bar: NSObject, NSMenuDelegate {
         out.append(text(snap.next.reason, 11, .regular, .secondaryLabelColor))
         if let blocked = snap.next.blocked_by {
             out.append(text("\n     not switching: \(blocked)", 11,
+                            .regular, .tertiaryLabelColor))
+        }
+        if let after = snap.next.after {
+            out.append(text("\n     then \(after) takes over", 11,
                             .regular, .tertiaryLabelColor))
         }
         return out

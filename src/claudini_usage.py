@@ -706,17 +706,28 @@ def usable_accounts(rows, min_margin):
             if p["status"] == OK and (general_headroom(p) or 0) > min_margin]
 
 
-def pick_target(rows, state):
-    """The account we ought to be on, per the configured mode."""
+def preference(rows, state):
+    """The usable accounts, best first, in the order the mode prefers them.
+
+    Ranking rather than picking, so an interface can show the order and let
+    the choice explain itself — otherwise the greenest-looking account not
+    being chosen just looks like a bug.
+    """
     usable = usable_accounts(rows, state["min_margin"])
     if not usable:
-        return None
+        return []
     if state.get("mode") == MODE_ENDURANCE:
-        return _pick_endurance(usable)
-    return _pick_model(usable)
+        return _by_endurance(usable)
+    return _by_model(usable)
 
 
-def _pick_model(usable):
+def pick_target(rows, state):
+    """The account we ought to be on, per the configured mode."""
+    order = preference(rows, state)
+    return order[0] if order else None
+
+
+def _by_model(usable):
     """Protect the preferred model.
 
     Prefer an account that still has it, but only among those on the largest
@@ -728,21 +739,21 @@ def _pick_model(usable):
     with_model = [p for p in usable
                   if (model_headroom(p) or 0) > 0 and plan_rank(p) >= best_plan]
     if with_model:
-        return max(with_model, key=model_headroom)
-    return max(usable, key=general_headroom)
+        return sorted(with_model, key=lambda p: -(model_headroom(p) or 0))
+    return sorted(usable, key=lambda p: -(general_headroom(p) or 0))
 
 
-def _pick_endurance(usable):
+def _by_endurance(usable):
     """Spend what is about to expire.
 
     A weekly allowance that resets tonight is worth nothing kept, while one
     that resets in five days is a reserve. So burn the soonest-resetting
-    account first, and among accounts resetting at the same time take the one
-    with the most room so the next wall is furthest away.
+    account first, and among accounts resetting together take the one with the
+    most room so the next wall is furthest away.
     """
     horizon = dt.datetime.now().timestamp() + 30 * 86400
-    return min(usable, key=lambda p: (weekly_reset(p) or horizon,
-                                      -(general_headroom(p) or 0)))
+    return sorted(usable, key=lambda p: (weekly_reset(p) or horizon,
+                                         -(general_headroom(p) or 0)))
 
 
 def switch_trigger(active, target, state):
@@ -775,6 +786,52 @@ def staying(rows, plan):
     return bool(plan[0] and active and plan[0]["name"] == active["name"])
 
 
+def recovers_at(p):
+    """When this account stops being blocked — its binding window's reset."""
+    binding = binding_limit(p)
+    return binding["resets_at_epoch"] if binding else None
+
+
+def first_to_recover(rows):
+    """Of the accounts we can read, the one whose block lifts soonest.
+
+    When nothing has room, this is the only useful thing to say: naming the
+    account and the wait beats reporting that everything is full.
+    """
+    waiting = [p for p in rows if p["status"] == OK and recovers_at(p)]
+    return min(waiting, key=recovers_at) if waiting else None
+
+
+def ranked(rows, state):
+    """Rows in the order the policy prefers them.
+
+    The account in use, then the ones the mode would take, best first, then
+    those it cannot use, then those it cannot read. Alphabetical order made
+    the greenest-looking account appear above the one actually chosen.
+    """
+    order = {p["name"]: i for i, p in enumerate(preference(rows, state))}
+
+    def rank(p):
+        if p["active"]:
+            return (0, 0, p["name"])
+        if p["name"] in order:
+            return (1, order[p["name"]], p["name"])
+        return (2 if p["status"] == OK else 3, 0, p["name"])
+
+    return sorted(rows, key=rank)
+
+
+def runner_up(rows, state):
+    """The best account other than the one in use.
+
+    Shown when we are staying put, so the line says where you would go next
+    instead of repeating the account you are already on.
+    """
+    active = active_row(rows)
+    others = [p for p in rows if not active or p["name"] != active["name"]]
+    return pick_target(others, state)
+
+
 def plan_switch(rows, state):
     """What the next session gets: (target, why, blocked_by).
 
@@ -785,7 +842,15 @@ def plan_switch(rows, state):
     active = active_row(rows)
     target = pick_target(rows, state)
     if target is None:
-        return None, "no account has headroom left", "nothing to switch to"
+        # Everything is spent. The account to name is the one whose window
+        # reopens first, with the wait — that is the only actionable fact.
+        waiting = first_to_recover(rows)
+        if waiting:
+            return (waiting,
+                    "everything is spent — first to free up, in %s"
+                    % until(seconds_until_epoch(recovers_at(waiting))),
+                    "waiting for a reset")
+        return None, "no account can be read right now", "nothing to switch to"
     if active is None or target["name"] == active["name"]:
         return target, "already the best account available", None
 
@@ -1044,7 +1109,7 @@ def render(rows, plan=None):
         print("\033[33m%s\033[0m" % throttle_notice(left))
     print()
     ansi = {"critical": "\033[31m", "warning": "\033[33m", "ok": "\033[32m"}
-    for r in rows:
+    for r in ranked(rows, state):
         head = "%s %-14s %s" % ("●" if r["active"] else "○", r["name"], r["email"] or "?")
         if r.get("space"):
             head += "  ·  %s" % r["space"]
@@ -1126,7 +1191,7 @@ def for_json(rows, state, plan=None):
                 "general": l["kind"] in GENERAL_KINDS,
                 "preferred": l is preferred_limit(r),
             } for l in r["limits"]],
-        } for r in rows],
+        } for r in ranked(rows, state)],
         "auto": state["enabled"],
         "mode": state["mode"],
         "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
@@ -1139,7 +1204,11 @@ def for_json(rows, state, plan=None):
         "stale_after_sec": SUCCESS_TTL,
         "next": {"name": target["name"] if target else None,
                  "reason": why, "blocked_by": blocked,
-                 "staying": staying(rows, (target, why, blocked))},
+                 "staying": staying(rows, (target, why, blocked)),
+                 # Where you would go if this account ran out, so the line is
+                 # worth reading even when nothing is about to change.
+                 "after": (runner_up(rows, state) or {}).get("name")
+                          if staying(rows, (target, why, blocked)) else None},
     }
 
 

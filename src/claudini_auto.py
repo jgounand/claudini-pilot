@@ -94,6 +94,7 @@ class Console:
         throttled = cu.throttled_for()
         # Worked out once here, not on every frame.
         plan = plan or cu.plan_switch(rows, state)
+        rows = cu.ranked(rows, state)
         with self.lock:
             self.rows, self.state, self.plan = rows, state, plan
             self.message = (cu.throttle_notice(throttled) if throttled
