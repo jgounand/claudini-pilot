@@ -289,7 +289,7 @@ final class Bar: NSObject, NSMenuDelegate {
 
         menu.addItem(heading("Using now"))
         if let active = snap.profiles.first(where: { $0.active }) {
-            menu.addItem(readonly(row(active)))
+            menu.addItem(readonly(row(active, interactive: false)))
         }
 
         menu.addItem(.separator())
@@ -360,10 +360,15 @@ final class Bar: NSObject, NSMenuDelegate {
 
     /// One profile as two aligned lines: who it is, then its numbers in fixed
     /// columns so the eye can compare rows without reading them.
-    func row(_ p: Profile) -> NSAttributedString {
+    ///
+    /// `interactive` is what tells a row you can click it. AppKit does not dim
+    /// an attributed title on a disabled item, so without this the read-only
+    /// rows at the top look exactly like the actions underneath.
+    func row(_ p: Profile, interactive: Bool = true) -> NSAttributedString {
         let out = NSMutableAttributedString()
         out.append(mono("\(p.active ? "●" : "○") \(pad(p.name, 16))", 12,
-                        p.active ? .bold : .regular))
+                        p.active ? .bold : .regular,
+                        interactive ? .labelColor : .secondaryLabelColor))
 
         // Two profiles can share one email in different workspaces, so the
         // workspace and plan are what actually tell them apart.

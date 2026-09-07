@@ -3,9 +3,11 @@
 See how much is left on each of your Claude subscriptions, and switch between
 them from the menu bar, a terminal UI, or automatically.
 
-[claudini](https://github.com/kimrgrey/claudini) switches the active Claude Code
-account. It does not tell you *which* account you should switch to. This is the
-missing half: live usage for every profile, and a policy that picks for you.
+It grew out of [claudini](https://github.com/kimrgrey/claudini), which switches
+the active Claude Code account but does not tell you *which* account to switch
+to. It now does both: live usage for every profile, a policy that picks for
+you, and the switching and profile management itself — so claudini is optional.
+The two read the same layout, so they coexist if you already use it.
 
 ```
  claudini   auto: ON   mode: endurance   next: side — resets in 22h, spend it before it is lost
@@ -170,8 +172,9 @@ when that is happening and for how long.
 
 ## Install
 
-Requires macOS, [claudini](https://github.com/kimrgrey/claudini), Python 3.9+,
-and Xcode Command Line Tools for the menu bar app.
+Requires macOS, Python 3.9+, and Xcode Command Line Tools for the menu bar app.
+claudini is optional; if you have no profiles yet, log in with Claude Code as
+usual and run `claudini-usage --add NAME` to turn that login into the first one.
 
 ```sh
 git clone https://github.com/jgounand/claudini-pilot.git
@@ -189,6 +192,10 @@ claudini-usage                 # table of all profiles
 claudini-usage --json          # machine-readable, used by the menu bar app
 claudini-usage --switch NAME   # switch (wraps `claudini use`)
 claudini-usage --reconnect NAME  # OAuth login for one profile, active account untouched
+claudini-usage --add NAME      # save the credentials in use now as a new profile
+claudini-usage --rename OLD NEW
+claudini-usage --remove NAME   # refuses while the profile is in use
+claudini-usage --force         # re-read now, skipping the per-account waiting periods
 claudini-usage --auto on|off   # arm or disarm auto-switching
 claudini-usage --mode model|endurance   # which goal the policy optimises for
 claudini-usage --tick          # run one auto-switch decision now
@@ -204,10 +211,23 @@ Tuning lives in `~/.claudini/auto.json`:
 | `min_margin` | `5` | % of general headroom below which an account counts as spent |
 | `cooldown_min` | `10` | minutes between two automatic switches |
 
+## Switching, without claudini
+
+A profile is three things: a directory holding a `claude.json`, a keychain entry
+`claudini-profile-<name>` holding its OAuth credentials, and a name in
+`~/.claudini/config.json`. A profile is *active* when `~/.claude.json` is a
+symlink to its config file — that one path is what Claude Code reads.
+
+Switching therefore means: save the live credentials back into the outgoing
+profile (Claude Code refreshes them as it runs, so the profile's copy is behind
+by however long it was active), load the target's into the live slot, and
+repoint the link. The link is replaced rather than written through, so a session
+reading mid-switch sees one file or the other, never a half-written one.
+
 ## How it works
 
-claudini stores each profile's OAuth credentials in the macOS keychain under the
-service `claudini-profile-<name>`. This reads them, refreshes any expired access
+Each profile's OAuth credentials live in the macOS keychain under the service
+`claudini-profile-<name>`. This reads them, refreshes any expired access
 token (writing the rotated token back), and asks two endpoints what it needs:
 
 - `GET /api/oauth/usage` — the limits, the same numbers Claude Code's own

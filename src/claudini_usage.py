@@ -802,9 +802,102 @@ def plan_switch(rows, state):
     return target, why, None
 
 
+# --- managing profiles -------------------------------------------------------
+
+LIVE_SERVICE = "Claude Code-credentials"
+CLAUDE_JSON = os.path.expanduser("~/.claude.json")
+
+
+def _point_at(name):
+    """Aim ~/.claude.json at a profile, atomically.
+
+    Claude Code reads that one path, so a profile is active precisely when the
+    link points at its file. Replacing the link rather than writing through it
+    means a session reading mid-switch sees one file or the other, never a
+    half-written one.
+    """
+    if os.path.exists(CLAUDE_JSON) and not os.path.islink(CLAUDE_JSON):
+        raise RuntimeError("%s is a real file, not a profile link — refusing to "
+                           "replace it" % CLAUDE_JSON)
+    staging = CLAUDE_JSON + ".switching"
+    if os.path.islink(staging):
+        os.unlink(staging)
+    os.symlink(profile_config(name), staging)
+    os.replace(staging, CLAUDE_JSON)
+
+
 def switch(name):
-    return subprocess.run(["claudini", "use", name],
-                          capture_output=True, text=True).returncode == 0
+    """Make `name` the active profile.
+
+    The outgoing profile's credentials are saved first: Claude Code refreshes
+    the live slot as it runs, so the copy sitting in the profile is behind by
+    however long that profile was active.
+    """
+    if name not in profiles():
+        return False
+    current = active_profile()
+    if current == name:
+        return True
+
+    target = keychain_read(profile_service(name))
+    if not target:
+        return False
+    live = keychain_read(LIVE_SERVICE)
+    if current and live:
+        keychain_write(profile_service(current), live)
+
+    if not keychain_write(LIVE_SERVICE, target):
+        return False
+    try:
+        _point_at(name)
+    except (OSError, RuntimeError):
+        if live:                       # put the live slot back as it was
+            keychain_write(LIVE_SERVICE, live)
+        return False
+
+    _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=name), indent=2)
+    _CONFIG_CACHE.clear()
+    return True
+
+
+def add_profile(name):
+    """Save the credentials in use right now as a new profile."""
+    if name in profiles():
+        raise ValueError("profile %r already exists" % name)
+    live = keychain_read(LIVE_SERVICE)
+    if not live:
+        raise RuntimeError("no credentials in use to save")
+    keychain_write(profile_service(name), live)
+    _write_json(profile_config(name), _read_json(CLAUDE_JSON, {}), indent=2)
+
+
+def rename_profile(old, new):
+    if old not in profiles():
+        raise ValueError("no profile named %r" % old)
+    if new in profiles():
+        raise ValueError("profile %r already exists" % new)
+    credentials = keychain_read(profile_service(old))
+    if credentials:
+        keychain_write(profile_service(new), credentials)
+        keychain_delete(profile_service(old))
+    os.rename(os.path.dirname(profile_config(old)), os.path.dirname(profile_config(new)))
+    _CONFIG_CACHE.clear()
+    if active_profile() == old:
+        _point_at(new)
+        _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=new), indent=2)
+
+
+def remove_profile(name):
+    if name not in profiles():
+        raise ValueError("no profile named %r" % name)
+    if active_profile() == name:
+        raise ValueError("%r is in use — switch away from it first" % name)
+    keychain_delete(profile_service(name))
+    shutil.rmtree(os.path.dirname(profile_config(name)), ignore_errors=True)
+    cache = load_cache()
+    cache["profiles"].pop(name, None)
+    cache["identity"].pop(name, None)
+    save_cache(cache)
 
 
 def auto_tick(rows=None):
@@ -1059,6 +1152,19 @@ def main():
 
     if command == "--reconnect":
         reconnect(args[1])
+        return
+
+    if command in ("--add", "--rename", "--remove"):
+        try:
+            if command == "--add":
+                add_profile(args[1])
+            elif command == "--rename":
+                rename_profile(args[1], args[2])
+            else:
+                remove_profile(args[1])
+        except (ValueError, RuntimeError, OSError) as e:
+            sys.exit(str(e))
+        print("%s: done" % command.lstrip("-"))
         return
 
     if command == "--auto":                      # --auto on | off | status

@@ -8,10 +8,9 @@ TOOLS="$HOME/.claudini/tools"
 BIN="$HOME/.local/bin"
 APP="$HOME/Applications/ClaudiniBar.app"
 
-command -v claudini >/dev/null || {
-  echo "claudini est requis : https://github.com/kimrgrey/claudini" >&2
-  exit 1
-}
+# claudini is no longer required — this manages profiles, switching and logins
+# on its own — but if you already use it, the two read the same layout.
+command -v claudini >/dev/null || echo "note: claudini not found; not needed."
 
 mkdir -p "$TOOLS" "$BIN"
 ln -sfn "$REPO/src/claudini_usage.py" "$TOOLS/claudini_usage.py"
