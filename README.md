@@ -8,13 +8,13 @@ account. It does not tell you *which* account you should switch to. This is the
 missing half: live usage for every profile, and a policy that picks for you.
 
 ```
- claudini  actif: work          auto: ACTIF        → personal
+ claudini  using: personal      auto: ON      next: side — Fable spent here, available on side
 
   #  profile         account                workspace   plan      session week   Fable  reset   ⟲
  ●1  personal        you@example.com        personal    max 20x      18%   64%   100%   4h36   ⟲
   2  work            you@example.com        Acme Inc    team std    100%   29%          4h46
-  3  side            me@example.com         personal    max 20x      63%   72%    70%   1h57   ⟲
-  4  old             me@example.com                                 login required
+  3  side            other@example.com      personal    max 20x      63%   72%    70%   1h57   ⟲
+  4  old             stale@example.com                              login required
 ```
 
 Rows 1 and 2 are the *same account* in two different workspaces — different
@@ -93,15 +93,19 @@ told. It cannot grant the command on an account that does not have it.
 
 ## When an account needs a new login
 
-An account whose refresh token has expired shows `reconnexion requise`. Click it
-in the menu bar, or press its number in the console, and you get an OAuth login
-for **that** account — without leaving your active account behind.
+Refresh tokens expire after a few days, and an account whose token is dead shows
+`login required`. Click it in the menu bar, or press its number in the console,
+and you get an OAuth login for **that** account.
 
-The login itself has to happen in the active slot, so the flow puts the target
-profile there, runs `claude auth login`, files the fresh credentials into that
-profile's keychain entry, and puts your original account back. That happens even
-if the login fails or you hit Ctrl-C. Don't start a new `claude` session in
-another terminal during the login — it would write into the wrong profile.
+Your active account never moves. The login runs in a throwaway
+`CLAUDE_CONFIG_DIR`, which gets its own keychain slot and its own `claude.json`,
+so neither the active profile nor any running `claude` session is touched — the
+thing that would otherwise corrupt a live session's config. The fresh
+credentials are then filed into the profile you meant to fix and the temporary
+slot is deleted.
+
+That temporary slot's keychain service name carries an unguessable suffix, so it
+is found by diffing the keychain entries around the login rather than computed.
 
 ## Rate limits
 
@@ -131,6 +135,7 @@ the commands. Re-run `./install.sh` to rebuild the menu bar app.
 claudini-usage                 # table of all profiles
 claudini-usage --json          # machine-readable, used by the menu bar app
 claudini-usage --switch NAME   # switch (wraps `claudini use`)
+claudini-usage --reconnect NAME  # OAuth login for one profile, active account untouched
 claudini-usage --auto on|off   # arm or disarm auto-switching
 claudini-usage --tick          # run one auto-switch decision now
 claudini-auto                  # the console: a auto · r refresh · 1-9 switch · q quit
@@ -148,13 +153,22 @@ Tuning lives in `~/.claudini/auto.json`:
 
 claudini stores each profile's OAuth credentials in the macOS keychain under the
 service `claudini-profile-<name>`. This reads them, refreshes any expired access
-token (writing the rotated token back), and asks
-`GET https://api.anthropic.com/api/oauth/usage` what is left. Results are cached,
-and an account that fails to refresh is left alone for 15 minutes rather than
-being retried every tick.
+token (writing the rotated token back), and asks two endpoints what it needs:
 
-Nothing is sent anywhere else. Credentials never leave the keychain and the
-API call.
+- `GET /api/oauth/usage` — the limits, the same numbers Claude Code's own
+  `/usage` shows.
+- `GET /api/claude_cli/bootstrap` — the workspace, plan and seat tier, which is
+  what makes two profiles on one email distinguishable and what decides whether
+  a missing model quota means "untouched" or "no access". This one is cached for
+  a day, since an account's plan doesn't move.
+
+Everything derived from those — headroom, spent model quotas, reset countdowns,
+whether an account needs a login, and the switch decision itself — is computed
+once in the Python engine. The menu bar app decodes that and draws it; it holds
+no policy of its own.
+
+Nothing is sent anywhere else. Credentials never leave the keychain and those
+two API calls.
 
 ## Caveats
 
