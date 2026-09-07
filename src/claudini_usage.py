@@ -122,7 +122,7 @@ STATUS_TEXT = {
     RATE_LIMITED: "rate limited",
     NEEDS_LOGIN: "login required",
     UNREACHABLE: "unreachable",
-    BLOCKED: "OAuth blocked for this workspace",
+    BLOCKED: "usage not readable for this workspace right now",
 }
 
 
@@ -140,7 +140,10 @@ RETRY = {
     UNREACHABLE: (20, 5 * 60),
     RATE_LIMITED: (THROTTLE_SEC, THROTTLE_SEC),
     NEEDS_LOGIN: (15 * 60, 6 * 3600),
-    BLOCKED: (6 * 3600, 6 * 3600),
+    # Observed to clear on its own within the hour, so this is not the
+    # permanent org policy its wording suggests. Backing off for hours would
+    # keep showing an error long after the account started answering again.
+    BLOCKED: (5 * 60, 60 * 60),
 }
 DEFAULT_RETRY = (15 * 60, 6 * 3600)
 
@@ -510,8 +513,10 @@ def fetch(name, is_active, identity=None):
             # A permission error is the organisation refusing OAuth, not a bad
             # token — refreshing or logging in again cannot fix it.
             if e.code == 403 and "permission_error" in body:
-                return _failed(out, BLOCKED,
-                               api_message(body) or "OAuth not allowed for this organisation")
+                # The account itself still works — inference and the profile
+                # endpoint answer fine; it is this reporting endpoint the
+                # workspace is refusing, and it has been seen to come back.
+                return _failed(out, BLOCKED, api_message(body))
             if e.code in (401, 403) and not is_active and not attempt:
                 continue                     # stale token: refresh and retry
             if e.code in (401, 403):
