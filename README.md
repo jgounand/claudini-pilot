@@ -10,16 +10,18 @@ missing half: live usage for every profile, and a policy that picks for you.
 ```
  claudini  actif: work          auto: ACTIF        → personal
 
-  #  profil          compte                   espace         session  semaine   Fable   reset   ⟲
- ●1  personal        you@example.com          perso            63%      72%     100%    3h47    ⟲
-  2  work            you@example.com          Acme Inc         100%     42%      70%    1h57
-  3  side            me@example.com           perso            reconnexion requise
+  #  profile         account                workspace   plan      session week   Fable  reset   ⟲
+ ●1  personal        you@example.com        personal    max 20x      18%   64%   100%   4h36   ⟲
+  2  work            you@example.com        Acme Inc    team std    100%   29%          4h46
+  3  side            me@example.com         personal    max 20x      63%   72%    70%   1h57   ⟲
+  4  old             me@example.com                                 login required
 ```
 
 Rows 1 and 2 are the *same account* in two different workspaces — different
 subscriptions, different limits, and only one of them has `/limit-reset`. The
-email alone can't tell them apart, so the workspace is shown next to it, read
-from the API rather than from local config (which another session can overwrite).
+email alone can't tell them apart, so the workspace and plan are shown next to
+it, read from the API rather than from local config (which another session can
+overwrite).
 
 ## What you get
 
@@ -42,13 +44,28 @@ out well before the others if that's what you use.
 
 The policy is *stay on a model, then fall back*:
 
-1. Prefer an account that still has the target model available (Fable by default).
-2. When every account has burned that model's quota, take the account with the
-   most general headroom instead.
+1. Prefer an account that still has the target model available (Fable by default)
+   — but only among accounts on the largest plan you have. A team seat with
+   untouched Fable is worth less than a Max 20x with real headroom left, because
+   percentages aren't comparable across plans: 20% of a team seat is not 20% of
+   a Max 20x.
+2. When no account on that plan has the model, take the one with the most
+   general headroom instead.
 3. Never pick an account whose general limits are already maxed — a full Fable
    quota is worthless if the 5-hour window is at 100%.
 4. Only switch when the current account is actually blocked, and never more than
    once per cooldown (10 min default). No churn.
+
+On a team plan the *seat* decides which models you get. A standard seat has no
+premium model, and reports no quota line for it — which is not the same as an
+untouched quota, so those accounts don't win the model preference. Upgrade the
+seat to premium and it counts again, with no configuration on your side.
+
+The console and the menu bar both name the account the next session will use,
+the reason it's better, and — when nothing is moving — what is holding the
+switch back ("auto-switching is off", "cooldown, 4 min left", "current account
+is not blocked yet"). That decision is made once, in the engine; the interfaces
+only spell it out.
 
 Auto-switching is **off** by default. Turn it on with `a` in the console, from
 the menu bar, or `claudini-usage --auto on`.

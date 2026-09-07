@@ -1,39 +1,57 @@
-// ClaudiniBar — menu bar macOS : conso de chaque abonnement Claude + bascule en 1 clic.
-// Compile : swiftc -O -o ClaudiniBar main.swift -framework AppKit
+// ClaudiniBar — macOS menu bar: what's left on each Claude subscription, and
+// one-click switching between them.
+//
+// All the policy lives in the Python engine: this app decodes what the engine
+// decided and draws it. Build: swiftc -O -o ClaudiniBar main.swift -framework AppKit
 
 import AppKit
 
 let helper = NSString(string: "~/.claudini/tools/claudini_usage.py").expandingTildeInPath
 
+/// How long a snapshot stays good enough to skip a reload. Matches the
+/// engine's own SUCCESS_TTL, which would serve the same rows from cache.
+let snapshotTTL: TimeInterval = 45
+let refreshInterval: TimeInterval = 300
+
+// MARK: - the engine's contract
+
 struct Limit: Decodable {
     let kind: String?
     let label: String
     let percent: Int
-    let severity: String?
-    let resets_at: String?
+    let level: String
+    let resets_in_sec: Int?
 }
 
 struct Profile: Decodable {
     let name: String
     let email: String?
-    let org: String?
     let active: Bool
     let status: String
     let limits: [Limit]
     let limit_reset: Bool?
+    let needs_login: Bool
     let space: String?
-    let plan: String?
+    let plan_label: String?
+    let headroom: Int?
+    let saturated: [String]
+}
+
+/// What the next `claude` session gets, and what stops us moving there.
+struct NextUp: Decodable {
+    let name: String?
+    let reason: String
+    let blocked_by: String?
 }
 
 struct Snapshot: Decodable {
-    let active: String?
     let profiles: [Profile]
     let auto: Bool
-    let suggestion: String?
     let throttled_for: Int?
+    let next: NextUp
 }
 
-// MARK: - shell
+// MARK: - helpers
 
 @discardableResult
 func run(_ launchPath: String, _ args: [String]) -> (Int32, Data) {
@@ -43,7 +61,7 @@ func run(_ launchPath: String, _ args: [String]) -> (Int32, Data) {
     let pipe = Pipe()
     p.standardOutput = pipe
     p.standardError = FileHandle.nullDevice
-    // L'app n'hérite pas forcément du PATH du shell : on l'étoffe pour `claudini`.
+    // A menu bar app doesn't inherit the shell's PATH: widen it for `claudini`.
     var env = ProcessInfo.processInfo.environment
     env["PATH"] = (env["PATH"] ?? "") + ":/usr/local/bin:/opt/homebrew/bin"
     p.environment = env
@@ -53,78 +71,91 @@ func run(_ launchPath: String, _ args: [String]) -> (Int32, Data) {
     return (p.terminationStatus, out)
 }
 
-// MARK: - formatage
+func text(_ s: String, _ size: CGFloat,
+          _ weight: NSFont.Weight = .regular,
+          _ color: NSColor = .labelColor) -> NSAttributedString {
+    NSAttributedString(string: s, attributes: [
+        .font: NSFont.systemFont(ofSize: size, weight: weight),
+        .foregroundColor: color,
+    ])
+}
 
-func countdown(_ iso: String?) -> String {
-    guard let iso else { return "" }
-    // Python écrit 6 décimales de secondes, ISO8601DateFormatter n'en accepte que 3 :
-    // on retire la partie fractionnaire avant de parser.
-    let trimmed = iso.replacingOccurrences(of: "\\.[0-9]+", with: "",
-                                           options: .regularExpression)
-    guard let date = ISO8601DateFormatter().date(from: trimmed) else { return "" }
-    let mins = Int(date.timeIntervalSinceNow / 60)
-    if mins <= 0 { return "maintenant" }
+func digits(_ s: String, _ size: CGFloat, _ color: NSColor) -> NSAttributedString {
+    NSAttributedString(string: s, attributes: [
+        .font: NSFont.monospacedDigitSystemFont(ofSize: size, weight: .regular),
+        .foregroundColor: color,
+    ])
+}
+
+func color(_ level: String) -> NSColor {
+    switch level {
+    case "critical": return .systemRed
+    case "warning": return .systemOrange
+    default: return .systemGreen
+    }
+}
+
+func duration(_ seconds: Int?) -> String {
+    guard let seconds else { return "" }
+    let mins = seconds / 60
+    if mins <= 0 { return "now" }
     if mins < 60 { return "\(mins)min" }
     if mins < 1440 { return String(format: "%dh%02d", mins / 60, mins % 60) }
-    return "\(mins / 1440)j"
+    return "\(mins / 1440)d"
 }
 
-func color(_ pct: Int) -> NSColor {
-    if pct >= 95 { return .systemRed }
-    if pct >= 75 { return .systemOrange }
-    return .systemGreen
-}
-
-/// Marge sur les limites générales (session 5h + semaine), hors quotas par modèle.
-func generalHeadroom(_ p: Profile) -> Int {
-    let general = p.limits.filter { $0.kind == "session" || $0.kind == "weekly_all" }
-    guard p.status == "ok", !general.isEmpty else { return -1 }
-    return 100 - (general.map(\.percent).max() ?? 100)
-}
-
-/// Marge réelle toutes limites confondues — c'est elle qui décide du meilleur profil.
-func headroom(_ p: Profile) -> Int {
-    guard p.status == "ok", !p.limits.isEmpty else { return -1 }
-    return 100 - (p.limits.map(\.percent).max() ?? 100)
-}
-
-/// Modèles dont le quota hebdo dédié est épuisé (Fable, Opus…).
-func saturatedModels(_ p: Profile) -> [String] {
-    p.limits.filter { $0.kind != "session" && $0.kind != "weekly_all" && $0.percent >= 100 }
-            .map(\.label)
+/// Short label for a limit, keeping the menu narrow.
+func shortLabel(_ l: Limit) -> String {
+    switch l.kind {
+    case "session": return "5h"
+    case "weekly_all": return "7d"
+    default: return l.label
+    }
 }
 
 // MARK: - app
 
 final class Bar: NSObject, NSMenuDelegate {
-    let item = NSStatusItem.autosaveName("ClaudiniBar")
+    let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var snapshot: Snapshot?
+    var loadedAt = Date.distantPast
     var loading = false
+    var timer: Timer?
 
     override init() {
         super.init()
+        item.autosaveName = "ClaudiniBar"
         item.button?.title = "◌"
         let menu = NSMenu()
         menu.delegate = self
-        // On gère nous-mêmes l'état des lignes : le profil actif reste inerte.
-        menu.autoenablesItems = false
         item.menu = menu
         reload()
-        Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { _ in self.reload() }
+        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) {
+            [weak self] _ in self?.reload()
+        }
     }
 
     func reload() {
         guard !loading else { return }
         loading = true
         DispatchQueue.global(qos: .utility).async {
+            // --tick lets the engine act on the auto policy in the same pass.
             let (_, data) = run("/usr/bin/env", ["python3", helper, "--json", "--tick"])
             let snap = try? JSONDecoder().decode(Snapshot.self, from: data)
             DispatchQueue.main.async {
                 self.loading = false
-                if let snap { self.snapshot = snap }
+                if let snap {
+                    self.snapshot = snap
+                    self.loadedAt = Date()
+                }
                 self.paint()
             }
         }
+    }
+
+    /// Run something slow without freezing the status item.
+    func inBackground(_ work: @escaping () -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async(execute: work)
     }
 
     func paint() {
@@ -132,198 +163,193 @@ final class Bar: NSObject, NSMenuDelegate {
             item.button?.title = "⚠︎"
             return
         }
-        let left = generalHeadroom(active)
-        let attr = NSMutableAttributedString(string: active.name + " ", attributes: [
-            .font: NSFont.systemFont(ofSize: 12, weight: .medium),
-        ])
-        attr.append(NSAttributedString(string: left < 0 ? "?" : "\(left)%", attributes: [
-            .font: NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .medium),
-            .foregroundColor: left < 0 ? NSColor.labelColor : color(100 - left),
-        ]))
-        // Quota modèle épuisé : on le signale par son initiale, sinon l'info se perd.
-        let dead = saturatedModels(active).map { String($0.prefix(1)) }
-        if !dead.isEmpty {
-            attr.append(NSAttributedString(string: " " + dead.joined(), attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
-                .foregroundColor: NSColor.systemRed,
-            ]))
+        let title = NSMutableAttributedString(attributedString:
+            text(active.name + " ", 12, .medium))
+        title.append(digits(active.headroom.map { "\($0)%" } ?? "?", 12,
+                            active.headroom.map { color(level(spent: $0)) } ?? .labelColor))
+        // A spent model quota is invisible in the headroom number: flag it.
+        if !active.saturated.isEmpty {
+            let initials = active.saturated.map { String($0.prefix(1)) }.joined()
+            title.append(text(" " + initials, 11, .bold, .systemRed))
         }
         if snap.auto {
-            attr.append(NSAttributedString(string: " ⟳", attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
-                .foregroundColor: NSColor.controlAccentColor,
-            ]))
+            title.append(text(" ⟳", 11, .bold, .controlAccentColor))
         }
-        item.button?.attributedTitle = attr
+        item.button?.attributedTitle = title
+    }
+
+    private func level(spent headroom: Int) -> String {
+        headroom <= 5 ? "critical" : headroom <= 25 ? "warning" : "ok"
     }
 
     // MARK: menu
 
     func menuWillOpen(_ menu: NSMenu) {
         rebuild(menu)
-        reload()
+        // The open menu is drawn from the snapshot we already have; only ask
+        // the engine again when that snapshot has actually gone stale.
+        if Date().timeIntervalSince(loadedAt) > snapshotTTL { reload() }
     }
 
     func rebuild(_ menu: NSMenu) {
         menu.removeAllItems()
         guard let snap = snapshot else {
-            menu.addItem(withTitle: "Chargement…", action: nil, keyEquivalent: "")
+            menu.addItem(withTitle: "Loading…", action: nil, keyEquivalent: "")
             return
         }
 
-        // Recommandation : le profil sain qui a le plus de marge.
-        let best = snap.profiles.filter { !$0.active && headroom($0) >= 0 }
-                                .max { headroom($0) < headroom($1) }
-        if let best, headroom(best) > 0 {
-            let head = NSMenuItem(title: "Basculer sur \(best.name) — \(headroom(best))% de marge",
-                                  action: #selector(switchTo(_:)), keyEquivalent: "")
-            head.target = self
-            head.representedObject = best.name
-            head.isEnabled = true
-            head.attributedTitle = NSAttributedString(string: head.title, attributes: [
-                .font: NSFont.systemFont(ofSize: 13, weight: .semibold),
-                .foregroundColor: NSColor.systemGreen,
-            ])
-            menu.addItem(head)
-            menu.addItem(.separator())
+        menu.addItem(heading("Using now"))
+        if let active = snap.profiles.first(where: { $0.active }) {
+            menu.addItem(readonly(row(active)))
         }
 
-        for p in snap.profiles {
-            let needsLogin = p.status != "ok" && p.status != "rate limited"
+        menu.addItem(.separator())
+        menu.addItem(heading("Next session"))
+        menu.addItem(readonly(nextLine(snap)))
+
+        menu.addItem(.separator())
+        menu.addItem(heading("Switch to"))
+        for p in snap.profiles where !p.active {
             let mi = NSMenuItem(title: p.name,
-                                action: needsLogin ? #selector(reconnect(_:)) : #selector(switchTo(_:)),
+                                action: p.needs_login ? #selector(reconnect(_:))
+                                                      : #selector(switchTo(_:)),
                                 keyEquivalent: "")
             mi.target = self
             mi.representedObject = p.name
             mi.attributedTitle = row(p)
-            mi.isEnabled = !p.active || needsLogin
             menu.addItem(mi)
         }
 
         menu.addItem(.separator())
         if let pause = snap.throttled_for, pause > 0 {
-            let notice = NSMenuItem(title: "API en pause \(pause)s — affichage depuis le cache",
-                                    action: nil, keyEquivalent: "")
-            notice.isEnabled = false
-            menu.addItem(notice)
+            menu.addItem(readonly(text("API paused for \(pause)s — showing cached data",
+                                       11, .regular, .secondaryLabelColor)))
         }
-        let auto = NSMenuItem(title: snap.auto ? "Bascule auto : ACTIVE" : "Bascule auto : inactive",
+        let auto = NSMenuItem(title: snap.auto ? "Auto-switching: ON" : "Auto-switching: off",
                               action: #selector(toggleAuto), keyEquivalent: "a")
         auto.target = self
-        auto.isEnabled = true
         auto.state = snap.auto ? .on : .off
         menu.addItem(auto)
 
-        let refresh = NSMenuItem(title: "Rafraîchir", action: #selector(refreshNow), keyEquivalent: "r")
-        refresh.isEnabled = true
-        refresh.target = self
-        menu.addItem(refresh)
-        let quit = NSMenuItem(title: "Quitter", action: #selector(quit), keyEquivalent: "q")
-        quit.isEnabled = true
-        quit.target = self
-        menu.addItem(quit)
+        for (title, action, key) in [("Refresh", #selector(refreshNow), "r"),
+                                     ("Quit", #selector(quit), "q")] {
+            let mi = NSMenuItem(title: title, action: action, keyEquivalent: key)
+            mi.target = self
+            menu.addItem(mi)
+        }
+    }
+
+    /// A non-clickable item; `heading` is one styled as a section title.
+    func readonly(_ title: NSAttributedString) -> NSMenuItem {
+        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
+        item.isEnabled = false
+        item.attributedTitle = title
+        return item
+    }
+
+    func heading(_ title: String) -> NSMenuItem {
+        readonly(NSAttributedString(string: title.uppercased(), attributes: [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.tertiaryLabelColor,
+            .kern: 0.8,
+        ]))
     }
 
     func row(_ p: Profile) -> NSAttributedString {
         let out = NSMutableAttributedString()
-        let mark = p.active ? "●" : "○"
-        out.append(NSAttributedString(string: "\(mark) \(p.name)", attributes: [
-            .font: NSFont.systemFont(ofSize: 13, weight: p.active ? .bold : .regular),
-        ]))
-        // Deux profils peuvent porter le même email dans deux organisations
-        // différentes : sans l'espace, la ligne est ambiguë.
+        out.append(text("\(p.active ? "●" : "○") \(p.name)", 13, p.active ? .bold : .regular))
+
+        // Two profiles can share one email in different workspaces, so the
+        // workspace and plan are what actually tell them apart.
         var who = "  \(p.email ?? "?")"
         if let space = p.space { who += "  ·  \(space)" }
-        if let plan = p.plan, !plan.isEmpty { who += " (\(plan))" }
-        out.append(NSAttributedString(string: who + "\n", attributes: [
-            .font: NSFont.systemFont(ofSize: 11),
-            .foregroundColor: NSColor.secondaryLabelColor,
-        ]))
+        if let plan = p.plan_label, !plan.isEmpty { who += " (\(plan))" }
+        out.append(text(who + "\n", 11, .regular, .secondaryLabelColor))
 
-        if p.status != "ok" {
-            let hint = p.status == "rate limited" ? p.status : p.status + " — cliquer pour reconnecter"
-            out.append(NSAttributedString(string: "     " + hint, attributes: [
-                .font: NSFont.systemFont(ofSize: 11),
-                .foregroundColor: NSColor.systemRed,
-            ]))
+        guard p.status == "ok" else {
+            let hint = p.needs_login ? p.status + " — click to log in" : p.status
+            out.append(text("     " + hint, 11, .regular, .systemRed))
             return out
         }
 
-        out.append(NSAttributedString(string: "     ", attributes: [.font: NSFont.systemFont(ofSize: 11)]))
+        out.append(text("     ", 11))
         for (i, l) in p.limits.enumerated() {
-            if i > 0 {
-                out.append(NSAttributedString(string: " · ", attributes: [
-                    .font: NSFont.systemFont(ofSize: 11),
-                    .foregroundColor: NSColor.tertiaryLabelColor,
-                ]))
-            }
-            let short = l.kind == "session" ? "5h" : (l.kind == "weekly_all" ? "7j" : l.label)
-            out.append(NSAttributedString(string: "\(short) \(l.percent)%", attributes: [
-                .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular),
-                .foregroundColor: color(l.percent),
-            ]))
+            if i > 0 { out.append(text(" · ", 11, .regular, .tertiaryLabelColor)) }
+            out.append(digits("\(shortLabel(l)) \(l.percent)%", 11, color(l.level)))
         }
-        if let reset = p.limits.first(where: { $0.kind == "session" })?.resets_at {
-            out.append(NSAttributedString(string: "  ↻ \(countdown(reset))", attributes: [
-                .font: NSFont.systemFont(ofSize: 11),
-                .foregroundColor: NSColor.secondaryLabelColor,
-            ]))
+        if let session = p.limits.first(where: { $0.kind == "session" }) {
+            out.append(text("  ↻ \(duration(session.resets_in_sec))", 11,
+                            .regular, .secondaryLabelColor))
         }
-        // `/limit-reset` n'est ouvert que sur certains comptes : on le signale.
+        // `/limit-reset` is only open on some accounts: say which.
         if p.limit_reset == true {
-            out.append(NSAttributedString(string: "  ⟲", attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .bold),
-                .foregroundColor: NSColor.systemTeal,
-            ]))
+            out.append(text("  ⟲", 11, .bold, .systemTeal))
+        }
+        return out
+    }
+
+    /// The engine already decided where the next session goes and why; this
+    /// only spells its answer out.
+    func nextLine(_ snap: Snapshot) -> NSAttributedString {
+        guard let name = snap.next.name else {
+            return text("  " + snap.next.reason, 12, .regular, .secondaryLabelColor)
+        }
+        let staying = snap.profiles.first(where: { $0.active })?.name == name
+        let out = NSMutableAttributedString(attributedString:
+            text("  \(name)  ", 13, staying ? .medium : .semibold,
+                 staying ? .labelColor : .systemGreen))
+        out.append(text(snap.next.reason, 11, .regular, .secondaryLabelColor))
+        if let blocked = snap.next.blocked_by {
+            out.append(text("\n     not switching: \(blocked)", 11,
+                            .regular, .tertiaryLabelColor))
         }
         return out
     }
 
     // MARK: actions
 
-    /// Le login OAuth a besoin d'un vrai terminal : on en ouvre un.
+    /// The OAuth login needs a real terminal, so open one.
     @objc func reconnect(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         let cmd = "claudini-usage --reconnect \(name)"
-        run("/usr/bin/osascript", ["-e",
-            "tell application \"Terminal\" to do script \"\(cmd)\"",
-            "-e", "tell application \"Terminal\" to activate"])
+        inBackground {
+            run("/usr/bin/osascript", ["-e",
+                "tell application \"Terminal\" to do script \"\(cmd)\"",
+                "-e", "tell application \"Terminal\" to activate"])
+        }
     }
 
     @objc func switchTo(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
-        let (code, _) = run("/usr/bin/env", ["claudini", "use", name])
-
-        let alert = NSAlert()
-        if code == 0 {
-            alert.messageText = "Profil actif : \(name)"
-            alert.informativeText = "Les sessions Claude Code déjà ouvertes gardent l'ancien compte. "
-                + "Relance `claude` dans tes terminaux pour utiliser \(name)."
-        } else {
-            alert.alertStyle = .critical
-            alert.messageText = "Bascule impossible"
-            alert.informativeText = "`claudini use \(name)` a échoué. Vérifie dans un terminal."
+        inBackground {
+            let (code, _) = run("/usr/bin/env", ["claudini", "use", name])
+            DispatchQueue.main.async {
+                let alert = NSAlert()
+                if code == 0 {
+                    alert.messageText = "Now using \(name)"
+                    alert.informativeText = "Open `claude` sessions keep the account they "
+                        + "started with. Relaunch them to pick up \(name)."
+                } else {
+                    alert.alertStyle = .critical
+                    alert.messageText = "Could not switch"
+                    alert.informativeText = "`claudini use \(name)` failed. Try it in a terminal."
+                }
+                alert.runModal()
+                self.reload()
+            }
         }
-        alert.runModal()
-        reload()
     }
 
     @objc func toggleAuto() {
         let wanted = !(snapshot?.auto ?? false)
-        run("/usr/bin/env", ["python3", helper, "--auto", wanted ? "on" : "off"])
-        reload()
+        inBackground {
+            run("/usr/bin/env", ["python3", helper, "--auto", wanted ? "on" : "off"])
+            DispatchQueue.main.async { self.reload() }
+        }
     }
 
     @objc func refreshNow() { reload() }
     @objc func quit() { NSApp.terminate(nil) }
-}
-
-extension NSStatusItem {
-    static func autosaveName(_ name: String) -> NSStatusItem {
-        let i = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
-        i.autosaveName = name
-        return i
-    }
 }
 
 let app = NSApplication.shared

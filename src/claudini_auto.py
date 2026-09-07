@@ -1,82 +1,101 @@
 #!/usr/bin/env python3
 """
-claudini-auto — console de pilotage des comptes Claude.
+claudini-auto — a console for steering your Claude accounts.
 
-Affiche la conso de chaque abonnement, permet de basculer en une touche, et
-propose un mode automatique : rester sur un compte qui a encore du Fable,
-et retomber sur le compte le plus frais tous modèles confondus quand Fable
-est épuisé partout.
+Shows what is left on every subscription, switches with a single keypress, and
+hosts the auto-switch toggle: stay on an account that still has the preferred
+model, fall back to the freshest account overall once that model is spent.
 
-Touches : a auto · r rafraîchir · 1-9 basculer · q quitter
+Keys: a auto · r refresh · 1-9 switch or reconnect · q quit
 """
 
 import curses
-import importlib.util
 import os
+import sys
 import threading
 import time
 
-HERE = os.path.dirname(os.path.realpath(__file__))
-_spec = importlib.util.spec_from_file_location("cu", os.path.join(HERE, "claudini_usage.py"))
-cu = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(cu)
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+import claudini_usage as cu  # noqa: E402
 
 REFRESH_SEC = 90
+COLORS = {"ok": 1, "warning": 2, "critical": 3}
+
+# Table layout: (x, width, heading). The header line is built from this, so
+# columns and headings cannot drift apart.
+COLUMNS = [
+    (5, 15, "profile"),
+    (21, 22, "account"),
+    (44, 12, "workspace"),
+    (57, 9, "plan"),
+    (68, 7, "session"),
+    (76, 7, "week"),
+    (84, 6, cu.PREFERRED_MODEL),
+    (91, 7, "reset"),
+    (100, 1, "⟲"),
+]
+COL = {name: x for x, _, name in COLUMNS}
+COL_LIMITS = {"session": COL["session"], "weekly_all": COL["week"]}
+FOOTER = (" a auto · r refresh · 1-9 switch or reconnect · q quit"
+          "   ⟲ = /limit-reset available ")
+
+
+def header_line():
+    line = "  #"
+    for x, _, name in COLUMNS:
+        line = line.ljust(x) + name
+    return line
 
 
 class Console:
     def __init__(self):
         self.rows = []
         self.state = cu.load_state()
-        self.message = "chargement…"
+        self.plan = (None, "", None)
+        self.message = "loading…"
         self.busy = True
         self.lock = threading.Lock()
         self.stop = threading.Event()
 
-    # --- données -------------------------------------------------------------
+    # --- data ----------------------------------------------------------------
 
     def refresh(self, run_auto=True):
         with self.lock:
             self.busy = True
+        state = cu.load_state()
         rows = cu.collect()
-        msg = ""
-        if run_auto and cu.load_state()["enabled"]:
-            moved, msg = cu.auto_tick(rows)
+        message = ""
+        if run_auto and state["enabled"]:
+            rows, moved, message = cu.auto_tick(rows)
             if moved:
-                rows = cu.collect()          # l'actif a changé, on relit
-                msg = "bascule auto : " + msg
-        left = cu.throttled_for()
+                message = "auto-switched: " + message
+        throttled = cu.throttled_for()
+        # The plan is worked out once here, not on every frame.
+        plan = cu.plan_switch(rows, state)
         with self.lock:
-            self.rows = rows
-            self.state = cu.load_state()
-            if left:
-                self.message = "API en pause %ds (429) — affichage depuis le cache" % left
-            else:
-                self.message = msg or time.strftime("mis à jour à %H:%M:%S")
+            self.rows, self.state, self.plan = rows, state, plan
+            self.message = (cu.throttle_notice(throttled) if throttled
+                            else message or time.strftime("updated at %H:%M:%S"))
             self.busy = False
+
+    def spawn(self, **kwargs):
+        threading.Thread(target=self.refresh, kwargs=kwargs, daemon=True).start()
 
     def loop(self):
         while not self.stop.wait(REFRESH_SEC):
             self.refresh()
 
-    # --- rendu ---------------------------------------------------------------
-
-    def pair(self, pct):
-        if pct >= 95:
-            return curses.color_pair(3)
-        if pct >= 75:
-            return curses.color_pair(2)
-        return curses.color_pair(1)
+    # --- drawing -------------------------------------------------------------
 
     @staticmethod
     def clip(text, width):
-        """Tronque en le montrant : un email coupé net ressemble à un autre email."""
+        """Truncate visibly: an email cut short looks like a different email."""
         text = text or ""
         return text if len(text) <= width else text[:width - 1] + "…"
 
     @staticmethod
     def put(scr, y, x, text, attr=0):
-        """addstr qui se tait au lieu de planter quand le terminal est étroit."""
+        """addstr that stays quiet instead of raising on a narrow terminal."""
         h, w = scr.getmaxyx()
         if y >= h or x >= w:
             return
@@ -87,141 +106,148 @@ class Console:
 
     def draw(self, scr):
         scr.erase()
-        h, w = scr.getmaxyx()
+        h, _ = scr.getmaxyx()
         with self.lock:
-            rows, state, message, busy = self.rows, self.state, self.message, self.busy
+            rows, state, (target, why, blocked) = self.rows, self.state, self.plan
+            message, busy = self.message, self.busy
 
         active = next((p for p in rows if p["active"]), None)
-        target = cu.pick_target(rows, state["min_margin"]) if rows else None
-
-        # en-tête
         auto_on = state["enabled"]
         self.put(scr, 0, 0, " claudini ", curses.A_REVERSE | curses.A_BOLD)
-        self.put(scr, 0, 11, "actif: " + (active["name"] if active else "?"), curses.A_BOLD)
-        self.put(scr, 0, 40, "auto: " + ("ACTIF" if auto_on else "inactif"),
+        self.put(scr, 0, 11, "using: " + (active["name"] if active else "?"), curses.A_BOLD)
+        self.put(scr, 0, 40, "auto: " + ("ON" if auto_on else "off"),
                  curses.color_pair(1) | curses.A_BOLD if auto_on else curses.A_DIM)
-        if target and active and target["name"] != active["name"]:
-            self.put(scr, 0, 60, "→ %s" % target["name"], curses.color_pair(2))
+        if target:
+            same = active and target["name"] == active["name"]
+            note = "next: %s" % target["name"]
+            if blocked:
+                note += " — %s" % blocked
+            elif not same:
+                note += " — %s" % why
+            self.put(scr, 0, 54, note, curses.A_DIM if same else curses.color_pair(2))
 
-        y = 2
-        self.put(scr, y, 0,
-                 "  #  profil          compte                   espace         "
-                 "session   semaine    Fable   reset   ⟲", curses.A_DIM)
-        y += 1
-
+        self.put(scr, 2, 0, header_line(), curses.A_DIM)
+        y = 3
         for i, p in enumerate(rows, 1):
             if y >= h - 3:
                 break
-            mark = "●" if p["active"] else " "
-            bold = curses.A_BOLD if p["active"] else 0
-            self.put(scr, y, 0, " %s%d " % (mark, i), bold)
-            self.put(scr, y, 5, self.clip(p["name"], 15), bold)
-            self.put(scr, y, 21, self.clip(p["email"] or "?", 24), curses.A_DIM)
-            # `personal` et `team-seat` ont le même email : c'est l'espace qui
-            # les distingue.
-            self.put(scr, y, 46, self.clip(p.get("space"), 14),
-                     curses.A_DIM if p.get("space") == "perso" else curses.A_BOLD)
-
-            if p["status"] != "ok":
-                note = p["status"] + (" (cache)" if p.get("cached") else "")
-                self.put(scr, y, 62, note, curses.color_pair(3))
-                y += 1
-                continue
-
-            cols = {"session": 62, "weekly_all": 72}
-            for limit in p["limits"]:
-                col = cols.get(limit["kind"], 82)
-                if limit["kind"] not in cols and limit["label"].lower() != "fable":
-                    continue
-                self.put(scr, y, col, "%3d%%" % limit["percent"], self.pair(limit["percent"]))
-            reset = next((l["resets_at"] for l in p["limits"] if l["kind"] == "session"), None)
-            self.put(scr, y, 90, cu.until(reset)[:7], curses.A_DIM)
-            if p.get("limit_reset"):
-                self.put(scr, y, 98, "⟲", curses.color_pair(1))
+            self.draw_row(scr, y, i, p)
             y += 1
 
-        # pied de page
         self.put(scr, h - 2, 0, ("⏳ " if busy else "   ") + message, curses.A_DIM)
-        self.put(scr, h - 1, 0,
-                 " a auto · r rafraîchir · 1-9 basculer ou reconnecter · q quitter   ⟲ = /limit-reset ",
-                 curses.A_REVERSE)
+        self.put(scr, h - 1, 0, FOOTER, curses.A_REVERSE)
         scr.refresh()
 
+    def draw_row(self, scr, y, index, p):
+        bold = curses.A_BOLD if p["active"] else 0
+        self.put(scr, y, 0, " %s%d " % ("●" if p["active"] else " ", index), bold)
+        self.put(scr, y, COL["profile"], self.clip(p["name"], 15), bold)
+        self.put(scr, y, COL["account"], self.clip(p["email"] or "?", 22), curses.A_DIM)
+        # Two profiles can share one email in different workspaces: that column
+        # and the plan are what tell them apart.
+        self.put(scr, y, COL["workspace"], self.clip(p.get("space"), 12),
+                 curses.A_DIM if p.get("space") == "personal" else curses.A_BOLD)
+        self.put(scr, y, COL["plan"], self.clip(cu.plan_label(p), 9), curses.A_DIM)
+
+        if p["status"] != cu.OK:
+            note = p["status"] + (" (cached)" if p.get("cached") else "")
+            self.put(scr, y, COL["session"], note, curses.color_pair(3))
+            return
+
+        for limit in p["limits"]:
+            column = COL_LIMITS.get(limit["kind"])
+            if column is None:
+                if limit["label"].lower() != cu.PREFERRED_MODEL.lower():
+                    continue
+                column = COL[cu.PREFERRED_MODEL]
+            self.put(scr, y, column, "%3d%%" % limit["percent"],
+                     curses.color_pair(COLORS[cu.level(limit["percent"])]))
+
+        session = next((l for l in p["limits"] if l["kind"] == "session"), None)
+        if session:
+            self.put(scr, y, COL["reset"],
+                     cu.until(cu.seconds_until(session["resets_at"]))[:7], curses.A_DIM)
+        if p.get("limit_reset"):
+            self.put(scr, y, COL["⟲"], "⟲", curses.color_pair(1))
+
+    # --- actions -------------------------------------------------------------
+
     def reconnect(self, scr, name):
-        """Rend la main au terminal le temps du login OAuth, puis reprend."""
+        """Hand the terminal back for the OAuth login, then pick up again."""
         h, _ = scr.getmaxyx()
         self.put(scr, h - 2, 0,
-                 " %s doit être reconnecté — [l] login, autre touche pour annuler " % name,
+                 " %s needs a login — [l] log in, any other key to cancel " % name,
                  curses.A_REVERSE)
         scr.refresh()
-        scr.nodelay(False)
+        scr.timeout(-1)
         try:
-            answer = scr.getkey()
+            answer = scr.getch()
         finally:
-            scr.nodelay(True)
-        if answer not in ("l", "L"):
+            scr.timeout(1000)
+        if answer not in (ord("l"), ord("L")):
             with self.lock:
-                self.message = "reconnexion annulée"
+                self.message = "login cancelled"
             return
 
         curses.endwin()
         cu.reconnect(name)
-        input("\nEntrée pour revenir à la console…")
+        input("\nPress return to go back to the console…")
         scr.clear()
         curses.doupdate()
-        threading.Thread(target=lambda: self.refresh(run_auto=False), daemon=True).start()
+        self.spawn(run_auto=False)
 
-    # --- boucle clavier ------------------------------------------------------
+    def choose(self, scr, index):
+        with self.lock:
+            row = self.rows[index] if index < len(self.rows) else None
+        if row is None:
+            return
+        # An account that needs a login doesn't need a switch, it needs a login.
+        if cu.needs_login(row):
+            self.reconnect(scr, row["name"])
+            return
+        ok = cu.switch(row["name"])
+        with self.lock:
+            self.message = ("switched to %s — relaunch `claude` in your terminals"
+                            % row["name"]) if ok else "switch failed"
+        self.spawn(run_auto=False)
+
+    def toggle_auto(self):
+        state = cu.load_state()
+        state["enabled"] = not state["enabled"]
+        cu.save_state(state)
+        with self.lock:
+            self.state = state
+            self.message = "auto-switching %s" % ("on" if state["enabled"] else "off")
+        if state["enabled"]:
+            self.spawn()
+
+    # --- key loop ------------------------------------------------------------
 
     def run(self, scr):
         curses.curs_set(0)
         curses.use_default_colors()
-        for i, c in enumerate((curses.COLOR_GREEN, curses.COLOR_YELLOW, curses.COLOR_RED), 1):
-            curses.init_pair(i, c, -1)
-        scr.nodelay(True)
+        for pair, color in ((1, curses.COLOR_GREEN), (2, curses.COLOR_YELLOW),
+                            (3, curses.COLOR_RED)):
+            curses.init_pair(pair, color, -1)
+        # getch gives up after a second: one frame per second is enough for the
+        # countdowns, and a keypress wakes it immediately.
+        scr.timeout(1000)
 
-        threading.Thread(target=self.refresh, daemon=True).start()
+        self.spawn()
         threading.Thread(target=self.loop, daemon=True).start()
 
         while True:
             self.draw(scr)
-            time.sleep(0.2)
-            try:
-                key = scr.getkey()
-            except curses.error:
-                continue
-
-            if key in ("q", "Q"):
+            key = scr.getch()
+            if key in (ord("q"), ord("Q")):
                 self.stop.set()
                 return
-            if key in ("r", "R"):
-                threading.Thread(target=self.refresh, daemon=True).start()
-            elif key in ("a", "A"):
-                state = cu.load_state()
-                state["enabled"] = not state["enabled"]
-                cu.save_state(state)
-                with self.lock:
-                    self.state = state
-                    self.message = "auto %s" % ("activé" if state["enabled"] else "désactivé")
-                if state["enabled"]:
-                    threading.Thread(target=self.refresh, daemon=True).start()
-            elif key.isdigit() and key != "0":
-                idx = int(key) - 1
-                with self.lock:
-                    row = self.rows[idx] if idx < len(self.rows) else None
-                if row is None:
-                    continue
-                # Un compte à reconnecter n'a pas besoin d'une bascule mais
-                # d'un login : on propose celui-là.
-                if row["status"] != "ok" and row["status"] != cu.RATE_LIMITED:
-                    self.reconnect(scr, row["name"])
-                else:
-                    ok = cu.switch(row["name"])
-                    with self.lock:
-                        self.message = ("bascule sur %s — relance `claude` dans tes terminaux"
-                                        % row["name"]) if ok else "échec de la bascule"
-                    threading.Thread(target=lambda: self.refresh(run_auto=False),
-                                     daemon=True).start()
+            if key in (ord("r"), ord("R")):
+                self.spawn()
+            elif key in (ord("a"), ord("A")):
+                self.toggle_auto()
+            elif ord("1") <= key <= ord("9"):
+                self.choose(scr, key - ord("1"))
 
 
 if __name__ == "__main__":
