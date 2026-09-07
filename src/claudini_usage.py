@@ -16,7 +16,9 @@ Usage:
 """
 
 import concurrent.futures
+import contextlib
 import datetime as dt
+import fcntl
 import getpass
 import json
 import os
@@ -37,13 +39,38 @@ CACHE_FILE = os.path.join(CLAUDINI_HOME, "usage-cache.json")
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 BOOTSTRAP_URL = "https://api.anthropic.com/api/claude_cli/bootstrap"
-REFRESH_URL = "https://console.anthropic.com/v1/oauth/token"
+# The token endpoint lives on platform.claude.com, not on the API host, and it
+# sits behind Cloudflare: a request without a User-Agent is answered with
+# "error code: 1010" (client banned) long before Anthropic sees it, which reads
+# exactly like a rejected token if you are not looking closely.
+REFRESH_URL = "https://platform.claude.com/v1/oauth/token"
 # Claude Code's public client_id, the one visible in the OAuth login URL.
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
 BETA = "oauth-2025-04-20"
+USER_AGENT = "claudini-pilot/1.0 (+https://github.com/jgounand/claudini-pilot)"
 
 ACCOUNT = getpass.getuser()
 REFRESH_LOCK = threading.Lock()
+REFRESH_LOCK_FILE = os.path.join(CLAUDINI_HOME, "refresh.lock")
+
+
+@contextlib.contextmanager
+def refresh_guard():
+    """Serialise token refreshes across processes, not merely across threads.
+
+    The refresh token rotates on every use, and the console, the menu bar and
+    a one-off CLI run are three separate processes. Two of them refreshing the
+    same profile at once means the loser presents a token the winner already
+    consumed — which comes back as a dead credential on a perfectly good
+    account.
+    """
+    with REFRESH_LOCK:
+        with open(REFRESH_LOCK_FILE, "w") as handle:
+            fcntl.flock(handle, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle, fcntl.LOCK_UN)
 
 # The model worth protecting: its dedicated weekly quota runs out long before
 # the general limits do.
@@ -91,6 +118,7 @@ OK = "ok"
 RATE_LIMITED = "rate limited"
 NEEDS_LOGIN = "login required"
 UNREACHABLE = "unreachable"
+BLOCKED = "oauth blocked"
 
 # Two ways to be optimal, because there are two different goals.
 #   model      — protect the preferred model's weekly quota above all else.
@@ -260,6 +288,7 @@ def profile_meta(name):
 def http_json(url, token=None, data=None, timeout=20):
     req = urllib.request.Request(url)
     req.add_header("anthropic-beta", BETA)
+    req.add_header("User-Agent", USER_AGENT)
     if token:
         req.add_header("Authorization", "Bearer " + token)
     if data is not None:
@@ -281,7 +310,12 @@ def refresh(service, creds):
     # Refreshes are rare and the endpoint rate-limits fast: one at a time. The
     # timeout is short because this lock is held across it, and a stalled
     # refresh would block every other profile behind it.
-    with REFRESH_LOCK:
+    with refresh_guard():
+        # Someone may have refreshed this profile while we waited for the
+        # lock; their token is the live one, ours is already spent.
+        stored = (keychain_read(service) or {}).get("claudeAiOauth") or {}
+        if stored.get("accessToken") and stored["accessToken"] != oauth.get("accessToken"):
+            return stored["accessToken"], None, None
         try:
             new = http_json(REFRESH_URL, timeout=5, data={
                 "grant_type": "refresh_token",
@@ -291,7 +325,12 @@ def refresh(service, creds):
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 return None, RATE_LIMITED, None
-            return None, NEEDS_LOGIN, "refresh token rejected (HTTP %d)" % e.code
+            # Only the endpoint saying the grant is bad means a login is
+            # actually needed. Anything else is our side of the wire.
+            body = (e.read() or b"").decode("utf8", "replace")[:200]
+            if e.code == 400 and "invalid_grant" in body:
+                return None, NEEDS_LOGIN, "refresh token expired or revoked"
+            return None, UNREACHABLE, "refresh refused (HTTP %d) %s" % (e.code, body.strip())
         except Exception as e:
             return None, UNREACHABLE, "refresh endpoint unreachable (%s)" % type(e).__name__
 
@@ -332,6 +371,14 @@ def base_row(name, is_active, status=OK, detail=None):
     return {"name": name, "email": email, "active": is_active,
             "limit_reset": limit_reset, "status": status, "detail": detail,
             "limits": []}
+
+
+def api_message(body):
+    """The human-readable half of an Anthropic error body."""
+    try:
+        return json.loads(body).get("error", {}).get("message")
+    except (ValueError, AttributeError):
+        return None
 
 
 def _failed(out, status, detail=None):
@@ -377,6 +424,12 @@ def fetch(name, is_active, identity=None):
         except urllib.error.HTTPError as e:
             if e.code == 429:
                 return _failed(out, RATE_LIMITED)
+            body = (e.read() or b"").decode("utf8", "replace")[:400]
+            # A permission error is the organisation refusing OAuth, not a bad
+            # token — refreshing or logging in again cannot fix it.
+            if e.code == 403 and "permission_error" in body:
+                return _failed(out, BLOCKED,
+                               api_message(body) or "OAuth not allowed for this organisation")
             if e.code in (401, 403) and not is_active and not attempt:
                 continue                     # stale token: refresh and retry
             if e.code in (401, 403):
@@ -415,8 +468,14 @@ def fetch(name, is_active, identity=None):
     return out, fresh_identity
 
 
-def fail_delay(failures):
-    """How long to leave a broken account alone after N consecutive failures."""
+def fail_delay(failures, status=None):
+    """How long to leave a broken account alone after N consecutive failures.
+
+    An organisation that forbids OAuth won't change its mind in a quarter of
+    an hour, so that one goes straight to the ceiling.
+    """
+    if status == BLOCKED:
+        return MAX_FAIL_TTL
     return min(FAIL_TTL * 2 ** max(0, failures - 1), MAX_FAIL_TTL)
 
 
@@ -448,7 +507,8 @@ def collect():
             return served(entry, name) if entry else base_row(name, name == act, RATE_LIMITED)
         if entry:
             ok = entry["row"]["status"] == OK
-            age_limit = SUCCESS_TTL if ok else fail_delay(entry.get("fails", 1))
+            age_limit = (SUCCESS_TTL if ok
+                         else fail_delay(entry.get("fails", 1), entry["row"]["status"]))
             if now - entry["at"] < age_limit:
                 return served(entry, name)
 

@@ -114,6 +114,20 @@ another wall.
 Availability is decided server-side; this only reports what your client was
 told. It cannot grant the command on an account that does not have it.
 
+## When an account cannot be read
+
+Not every failure is a credentials problem, and the tool says which is which
+rather than offering a login for all of them:
+
+| what you see | what it means |
+|---|---|
+| `login required` | the refresh token really is expired or revoked — click to log in |
+| `oauth blocked` | the *organisation* has OAuth turned off (`oauth_not_allowed_for_organization`). The token is fine; no login will help. Someone with admin rights on that workspace has to allow it |
+| `rate limited` | a 429, nothing to do but wait |
+| `unreachable` | a network or server-side failure, retried on its own |
+
+Only the first offers a login. The detail line carries the API's own wording.
+
 ## When an account needs a new login
 
 Refresh tokens expire after a few days, and an account whose token is dead shows
@@ -198,6 +212,10 @@ token (writing the rotated token back), and asks two endpoints what it needs:
 
 - `GET /api/oauth/usage` — the limits, the same numbers Claude Code's own
   `/usage` shows.
+- `POST https://platform.claude.com/v1/oauth/token` — refreshing an expired
+  access token. Note the host: it is not the API host, and it sits behind
+  Cloudflare, which answers a request with no `User-Agent` with `error code:
+  1010` — indistinguishable from a rejected token if you don't read the body.
 - `GET /api/claude_cli/bootstrap` — the workspace, plan and seat tier, which is
   what makes two profiles on one email distinguishable and what decides whether
   a missing model quota means "untouched" or "no access". This one is cached for
