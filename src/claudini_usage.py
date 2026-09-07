@@ -821,6 +821,39 @@ def ranked(rows, state):
     return sorted(rows, key=rank)
 
 
+def fleet(rows, state):
+    """Whether you are heading for an outage, in one line's worth of facts.
+
+    The five-hour windows recycle and are staggered, so an account sitting at
+    100% session is on a short pause, not out. What actually runs out is the
+    weekly allowance, added up across the accounts — that number is the answer
+    to "can I keep working", and nothing else in the interface was saying it.
+    """
+    readable = [p for p in rows if p["status"] == OK and p["limits"]]
+    reserve = sum(100 - l["percent"]
+                  for p in readable for l in p["limits"] if l["kind"] == "weekly_all")
+    spent = [p for p in readable if (general_headroom(p) or 0) <= state["min_margin"]]
+    waiting = first_to_recover(spent)
+    return {
+        "usable": len(usable_accounts(rows, state["min_margin"])),
+        "total": len(rows),
+        # In whole accounts: 191% is nearly two untouched weeks of allowance.
+        "weekly_reserve": reserve,
+        "next_free": ({"name": waiting["name"],
+                       "in_sec": seconds_until_epoch(recovers_at(waiting))}
+                      if waiting else None),
+    }
+
+
+def fleet_line(summary):
+    parts = ["%d/%d usable" % (summary["usable"], summary["total"]),
+             "%d%% weekly in reserve" % summary["weekly_reserve"]]
+    if summary["next_free"]:
+        parts.append("%s frees up in %s" % (summary["next_free"]["name"],
+                                            until(summary["next_free"]["in_sec"])))
+    return " · ".join(parts)
+
+
 def runner_up(rows, state):
     """The best account other than the one in use.
 
@@ -1104,6 +1137,7 @@ def render(rows, plan=None):
     print("\033[1mmode\033[0m %s   \033[1mauto\033[0m %s   \033[1mnext\033[0m %s — %s"
           % (state["mode"], "on" if state["enabled"] else "off",
              target["name"] if target else "?", blocked or why))
+    print("\033[2m%s\033[0m" % fleet_line(fleet(rows, state)))
     left = throttled_for()
     if left:
         print("\033[33m%s\033[0m" % throttle_notice(left))
@@ -1193,6 +1227,7 @@ def for_json(rows, state, plan=None):
             } for l in r["limits"]],
         } for r in ranked(rows, state)],
         "auto": state["enabled"],
+        "fleet": fleet_line(fleet(rows, state)),
         "mode": state["mode"],
         "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
         # Only meaningful while the policy is protecting that model.

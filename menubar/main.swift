@@ -70,6 +70,8 @@ struct Mode: Decodable {
 struct Snapshot: Decodable {
     let profiles: [Profile]
     let auto: Bool
+    /// One line on whether the fleet as a whole is heading for an outage.
+    let fleet: String
     let mode: String
     let modes: [Mode]
     /// A spent model quota only means something while the policy protects it.
@@ -291,6 +293,7 @@ final class Bar: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(heading("Using now"))
+        menu.addItem(readonly(mono("  " + snap.fleet, 11, .regular, .secondaryLabelColor)))
         if let active = snap.profiles.first(where: { $0.active }) {
             menu.addItem(readonly(row(active, interactive: false)))
         }
@@ -404,13 +407,22 @@ final class Bar: NSObject, NSMenuDelegate {
 
     /// One fixed-width cell, blank when the account reports no such limit, so
     /// a missing model quota leaves a gap instead of shifting the row.
+    ///
+    /// The label sits right against its own value and the space goes between
+    /// cells. Padding between label and value instead put "19%" closer to the
+    /// next label than to the "5h" it belongs to, and the eye paired them
+    /// wrongly.
     private func append(slot limit: Limit?, to out: NSMutableAttributedString) {
+        let width = 10, gap = "   "
         guard let limit else {
-            out.append(mono(String(repeating: " ", count: 12), 11))
+            out.append(mono(String(repeating: " ", count: width + gap.count), 11))
             return
         }
-        out.append(mono(pad(limit.short_label, 6), 11, .regular, .secondaryLabelColor))
-        out.append(mono(padLeft("\(limit.percent)%", 5) + " ", 11, .medium, color(limit.level)))
+        let value = "\(limit.percent)%"
+        let lead = max(0, width - limit.short_label.count - 1 - value.count)
+        out.append(mono(String(repeating: " ", count: lead) + limit.short_label + " ",
+                        11, .regular, .secondaryLabelColor))
+        out.append(mono(value + gap, 11, .medium, color(limit.level)))
     }
 
     /// The engine already decided where the next session goes and why; this

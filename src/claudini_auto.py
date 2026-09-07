@@ -70,6 +70,7 @@ class Console:
         self.rows = []
         self.state = cu.load_state()
         self.plan = (None, "", None)
+        self.fleet = ""
         self.message = "loading…"
         self.busy = False
         self.version = 0          # bumped by refresh so the drawing loop notices
@@ -94,9 +95,10 @@ class Console:
         throttled = cu.throttled_for()
         # Worked out once here, not on every frame.
         plan = plan or cu.plan_switch(rows, state)
+        summary = cu.fleet_line(cu.fleet(rows, state))
         rows = cu.ranked(rows, state)
         with self.lock:
-            self.rows, self.state, self.plan = rows, state, plan
+            self.rows, self.state, self.plan, self.fleet = rows, state, plan, summary
             self.message = (cu.throttle_notice(throttled) if throttled
                             else message or time.strftime("updated at %H:%M:%S"))
             self.busy = False
@@ -149,7 +151,7 @@ class Console:
         h, _ = scr.getmaxyx()
         with self.lock:
             rows, state, (target, why, blocked) = self.rows, self.state, self.plan
-            message, busy = self.message, self.busy
+            message, busy, summary = self.message, self.busy, self.fleet
 
         active = cu.active_row(rows)
         auto_on = state["enabled"]
@@ -163,6 +165,7 @@ class Console:
             note = "next: %s — %s" % (target["name"], blocked or why)
             self.put(scr, 0, 62, note, curses.A_DIM if same else curses.color_pair(2))
 
+        self.put(scr, 1, 11, summary, curses.A_DIM)
         self.put(scr, 2, 0, HEADER, curses.A_DIM)
         y = 3
         for i, p in enumerate(rows, 1):
