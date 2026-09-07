@@ -18,8 +18,8 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 import claudini_usage as cu  # noqa: E402
 
-REFRESH_SEC = 90
 COLORS = {"ok": 1, "warning": 2, "critical": 3}
+REDRAW_MS = 5000
 
 # Table layout: (x, width, heading). The header line is built from this, so
 # columns and headings cannot drift apart.
@@ -35,9 +35,11 @@ COLUMNS = [
     (100, 1, "⟲"),
 ]
 COL = {name: x for x, _, name in COLUMNS}
-COL_LIMITS = {"session": COL["session"], "weekly_all": COL["week"]}
-FOOTER = (" a auto · r refresh · 1-9 switch or reconnect · q quit"
-          "   ⟲ = /limit-reset available ")
+WIDTH = {name: w for _, w, name in COLUMNS}
+# The engine decides what counts as a general limit; we only place its columns.
+COL_LIMITS = dict(zip(cu.GENERAL_KINDS, (COL["session"], COL["week"])))
+FOOTER = (" a auto · m mode · r refresh · 1-9 switch or reconnect · q quit"
+          "   ⟲ = /limit-reset ")
 
 
 def header_line():
@@ -47,20 +49,24 @@ def header_line():
     return line
 
 
+HEADER = header_line()
+
+
 class Console:
     def __init__(self):
         self.rows = []
         self.state = cu.load_state()
         self.plan = (None, "", None)
         self.message = "loading…"
-        self.busy = True
+        self.busy = False
         self.lock = threading.Lock()
-        self.stop = threading.Event()
 
     # --- data ----------------------------------------------------------------
 
     def refresh(self, run_auto=True):
         with self.lock:
+            if self.busy:
+                return          # a pass is already in flight; don't stack them
             self.busy = True
         state = cu.load_state()
         rows = cu.collect()
@@ -78,11 +84,12 @@ class Console:
                             else message or time.strftime("updated at %H:%M:%S"))
             self.busy = False
 
-    def spawn(self, **kwargs):
-        threading.Thread(target=self.refresh, kwargs=kwargs, daemon=True).start()
+    def spawn(self, run_auto=True):
+        threading.Thread(target=self.refresh, args=(run_auto,), daemon=True).start()
 
     def loop(self):
-        while not self.stop.wait(REFRESH_SEC):
+        while True:
+            time.sleep(cu.POLL_SEC)
             self.refresh()
 
     # --- drawing -------------------------------------------------------------
@@ -111,22 +118,21 @@ class Console:
             rows, state, (target, why, blocked) = self.rows, self.state, self.plan
             message, busy = self.message, self.busy
 
-        active = next((p for p in rows if p["active"]), None)
+        active = cu.active_row(rows)
         auto_on = state["enabled"]
         self.put(scr, 0, 0, " claudini ", curses.A_REVERSE | curses.A_BOLD)
         self.put(scr, 0, 11, "using: " + (active["name"] if active else "?"), curses.A_BOLD)
-        self.put(scr, 0, 40, "auto: " + ("ON" if auto_on else "off"),
+        self.put(scr, 0, 30, "auto: " + ("ON" if auto_on else "off"),
                  curses.color_pair(1) | curses.A_BOLD if auto_on else curses.A_DIM)
+        self.put(scr, 0, 42, "mode: " + state["mode"], curses.A_BOLD)
         if target:
+            # Staying put is explained by the reason; a target we are not
+            # taking is explained by what blocks it.
             same = active and target["name"] == active["name"]
-            note = "next: %s" % target["name"]
-            if blocked:
-                note += " — %s" % blocked
-            elif not same:
-                note += " — %s" % why
-            self.put(scr, 0, 54, note, curses.A_DIM if same else curses.color_pair(2))
+            note = "next: %s — %s" % (target["name"], why if same else (blocked or why))
+            self.put(scr, 0, 62, note, curses.A_DIM if same else curses.color_pair(2))
 
-        self.put(scr, 2, 0, header_line(), curses.A_DIM)
+        self.put(scr, 2, 0, HEADER, curses.A_DIM)
         y = 3
         for i, p in enumerate(rows, 1):
             if y >= h - 3:
@@ -141,32 +147,35 @@ class Console:
     def draw_row(self, scr, y, index, p):
         bold = curses.A_BOLD if p["active"] else 0
         self.put(scr, y, 0, " %s%d " % ("●" if p["active"] else " ", index), bold)
-        self.put(scr, y, COL["profile"], self.clip(p["name"], 15), bold)
-        self.put(scr, y, COL["account"], self.clip(p["email"] or "?", 22), curses.A_DIM)
+        self.put(scr, y, COL["profile"], self.clip(p["name"], WIDTH["profile"]), bold)
+        self.put(scr, y, COL["account"], self.clip(p["email"] or "?", WIDTH["account"]),
+                 curses.A_DIM)
         # Two profiles can share one email in different workspaces: that column
         # and the plan are what tell them apart.
-        self.put(scr, y, COL["workspace"], self.clip(p.get("space"), 12),
+        self.put(scr, y, COL["workspace"], self.clip(p.get("space"), WIDTH["workspace"]),
                  curses.A_DIM if p.get("space") == "personal" else curses.A_BOLD)
-        self.put(scr, y, COL["plan"], self.clip(cu.plan_label(p), 9), curses.A_DIM)
+        self.put(scr, y, COL["plan"], self.clip(cu.plan_label(p), WIDTH["plan"]), curses.A_DIM)
 
         if p["status"] != cu.OK:
-            note = p["status"] + (" (cached)" if p.get("cached") else "")
+            note = (p.get("detail") or p["status"]) + (" (cached)" if p.get("cached") else "")
             self.put(scr, y, COL["session"], note, curses.color_pair(3))
             return
 
+        preferred = cu.preferred_limit(p)
         for limit in p["limits"]:
             column = COL_LIMITS.get(limit["kind"])
             if column is None:
-                if limit["label"].lower() != cu.PREFERRED_MODEL.lower():
+                if limit is not preferred:
                     continue
                 column = COL[cu.PREFERRED_MODEL]
             self.put(scr, y, column, "%3d%%" % limit["percent"],
                      curses.color_pair(COLORS[cu.level(limit["percent"])]))
 
-        session = next((l for l in p["limits"] if l["kind"] == "session"), None)
+        session = next((l for l in p["limits"] if l["kind"] == cu.GENERAL_KINDS[0]), None)
         if session:
             self.put(scr, y, COL["reset"],
-                     cu.until(cu.seconds_until(session["resets_at"]))[:7], curses.A_DIM)
+                     cu.until(cu.seconds_until(session["resets_at"]))[:WIDTH["reset"]],
+                     curses.A_DIM)
         if p.get("limit_reset"):
             self.put(scr, y, COL["⟲"], "⟲", curses.color_pair(1))
 
@@ -183,7 +192,7 @@ class Console:
         try:
             answer = scr.getch()
         finally:
-            scr.timeout(1000)
+            scr.timeout(REDRAW_MS)
         if answer not in (ord("l"), ord("L")):
             with self.lock:
                 self.message = "login cancelled"
@@ -221,6 +230,16 @@ class Console:
         if state["enabled"]:
             self.spawn()
 
+    def cycle_mode(self):
+        state = cu.load_state()
+        following = (cu.MODES.index(state["mode"]) + 1) % len(cu.MODES)
+        state["mode"] = cu.MODES[following]
+        cu.save_state(state)
+        with self.lock:
+            self.state = state
+            self.message = "mode: %s" % state["mode"]
+        self.spawn(run_auto=False)
+
     # --- key loop ------------------------------------------------------------
 
     def run(self, scr):
@@ -229,9 +248,9 @@ class Console:
         for pair, color in ((1, curses.COLOR_GREEN), (2, curses.COLOR_YELLOW),
                             (3, curses.COLOR_RED)):
             curses.init_pair(pair, color, -1)
-        # getch gives up after a second: one frame per second is enough for the
-        # countdowns, and a keypress wakes it immediately.
-        scr.timeout(1000)
+        # Countdowns move by the minute, so redrawing every few seconds is
+        # already generous; a keypress still wakes getch instantly.
+        scr.timeout(REDRAW_MS)
 
         self.spawn()
         threading.Thread(target=self.loop, daemon=True).start()
@@ -240,12 +259,13 @@ class Console:
             self.draw(scr)
             key = scr.getch()
             if key in (ord("q"), ord("Q")):
-                self.stop.set()
                 return
             if key in (ord("r"), ord("R")):
                 self.spawn()
             elif key in (ord("a"), ord("A")):
                 self.toggle_auto()
+            elif key in (ord("m"), ord("M")):
+                self.cycle_mode()
             elif ord("1") <= key <= ord("9"):
                 self.choose(scr, key - ord("1"))
 

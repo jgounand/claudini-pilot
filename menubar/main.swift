@@ -8,19 +8,20 @@ import AppKit
 
 let helper = NSString(string: "~/.claudini/tools/claudini_usage.py").expandingTildeInPath
 
-/// How long a snapshot stays good enough to skip a reload. Matches the
-/// engine's own SUCCESS_TTL, which would serve the same rows from cache.
-let snapshotTTL: TimeInterval = 45
-let refreshInterval: TimeInterval = 300
+/// Fallback poll period, used only until the first snapshot arrives: after
+/// that the engine tells us its own cadence and staleness window.
+let defaultPoll: TimeInterval = 300
 
 // MARK: - the engine's contract
 
 struct Limit: Decodable {
     let kind: String?
     let label: String
+    let short_label: String
     let percent: Int
     let level: String
-    let resets_in_sec: Int?
+    /// Absolute, so the countdown stays right even drawn from a stale snapshot.
+    let resets_at_epoch: Int?
 }
 
 struct Profile: Decodable {
@@ -28,12 +29,14 @@ struct Profile: Decodable {
     let email: String?
     let active: Bool
     let status: String
+    let detail: String?
     let limits: [Limit]
     let limit_reset: Bool?
     let needs_login: Bool
     let space: String?
     let plan_label: String?
     let headroom: Int?
+    let headroom_level: String?
     let saturated: [String]
 }
 
@@ -47,7 +50,12 @@ struct NextUp: Decodable {
 struct Snapshot: Decodable {
     let profiles: [Profile]
     let auto: Bool
+    let mode: String
+    let modes: [String]
     let throttled_for: Int?
+    let throttle_notice: String?
+    let poll_after_sec: Int
+    let stale_after_sec: Int
     let next: NextUp
 }
 
@@ -95,21 +103,21 @@ func color(_ level: String) -> NSColor {
     }
 }
 
-func duration(_ seconds: Int?) -> String {
-    guard let seconds else { return "" }
-    let mins = seconds / 60
+func countdown(to epoch: Int?) -> String {
+    guard let epoch else { return "" }
+    let mins = max(0, epoch - Int(Date().timeIntervalSince1970)) / 60
     if mins <= 0 { return "now" }
     if mins < 60 { return "\(mins)min" }
     if mins < 1440 { return String(format: "%dh%02d", mins / 60, mins % 60) }
     return "\(mins / 1440)d"
 }
 
-/// Short label for a limit, keeping the menu narrow.
-func shortLabel(_ l: Limit) -> String {
-    switch l.kind {
-    case "session": return "5h"
-    case "weekly_all": return "7d"
-    default: return l.label
+/// The mode names come from the engine; these are the human descriptions.
+func modeTitle(_ mode: String) -> String {
+    switch mode {
+    case "model": return "model — keep Fable available"
+    case "endurance": return "endurance — spend what resets soonest"
+    default: return mode
     }
 }
 
@@ -120,6 +128,7 @@ final class Bar: NSObject, NSMenuDelegate {
     var snapshot: Snapshot?
     var loadedAt = Date.distantPast
     var loading = false
+    var poll = defaultPoll
     var timer: Timer?
 
     override init() {
@@ -130,7 +139,14 @@ final class Bar: NSObject, NSMenuDelegate {
         menu.delegate = self
         item.menu = menu
         reload()
-        timer = Timer.scheduledTimer(withTimeInterval: refreshInterval, repeats: true) {
+        schedule(defaultPoll)
+    }
+
+    /// The engine owns the cadence; re-arm whenever it says something else.
+    func schedule(_ interval: TimeInterval) {
+        poll = interval
+        timer?.invalidate()
+        timer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) {
             [weak self] _ in self?.reload()
         }
     }
@@ -147,6 +163,9 @@ final class Bar: NSObject, NSMenuDelegate {
                 if let snap {
                     self.snapshot = snap
                     self.loadedAt = Date()
+                    if TimeInterval(snap.poll_after_sec) != self.poll {
+                        self.schedule(TimeInterval(snap.poll_after_sec))
+                    }
                 }
                 self.paint()
             }
@@ -166,7 +185,7 @@ final class Bar: NSObject, NSMenuDelegate {
         let title = NSMutableAttributedString(attributedString:
             text(active.name + " ", 12, .medium))
         title.append(digits(active.headroom.map { "\($0)%" } ?? "?", 12,
-                            active.headroom.map { color(level(spent: $0)) } ?? .labelColor))
+                            active.headroom_level.map(color) ?? .labelColor))
         // A spent model quota is invisible in the headroom number: flag it.
         if !active.saturated.isEmpty {
             let initials = active.saturated.map { String($0.prefix(1)) }.joined()
@@ -178,17 +197,14 @@ final class Bar: NSObject, NSMenuDelegate {
         item.button?.attributedTitle = title
     }
 
-    private func level(spent headroom: Int) -> String {
-        headroom <= 5 ? "critical" : headroom <= 25 ? "warning" : "ok"
-    }
-
     // MARK: menu
 
     func menuWillOpen(_ menu: NSMenu) {
         rebuild(menu)
         // The open menu is drawn from the snapshot we already have; only ask
         // the engine again when that snapshot has actually gone stale.
-        if Date().timeIntervalSince(loadedAt) > snapshotTTL { reload() }
+        let stale = TimeInterval(snapshot?.stale_after_sec ?? Int(defaultPoll))
+        if Date().timeIntervalSince(loadedAt) > stale { reload() }
     }
 
     func rebuild(_ menu: NSMenu) {
@@ -221,15 +237,29 @@ final class Bar: NSObject, NSMenuDelegate {
         }
 
         menu.addItem(.separator())
-        if let pause = snap.throttled_for, pause > 0 {
-            menu.addItem(readonly(text("API paused for \(pause)s — showing cached data",
-                                       11, .regular, .secondaryLabelColor)))
+        if let notice = snap.throttle_notice {
+            menu.addItem(readonly(text(notice, 11, .regular, .secondaryLabelColor)))
         }
         let auto = NSMenuItem(title: snap.auto ? "Auto-switching: ON" : "Auto-switching: off",
                               action: #selector(toggleAuto), keyEquivalent: "a")
         auto.target = self
         auto.state = snap.auto ? .on : .off
         menu.addItem(auto)
+
+        // Two goals, two rankings: protect the preferred model, or spend the
+        // allowance that resets soonest so nothing expires unused.
+        let modes = NSMenuItem(title: "Mode: \(snap.mode)", action: nil, keyEquivalent: "")
+        let submenu = NSMenu()
+        for name in snap.modes {
+            let mi = NSMenuItem(title: modeTitle(name), action: #selector(setMode(_:)),
+                                keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = name
+            mi.state = name == snap.mode ? .on : .off
+            submenu.addItem(mi)
+        }
+        modes.submenu = submenu
+        menu.addItem(modes)
 
         for (title, action, key) in [("Refresh", #selector(refreshNow), "r"),
                                      ("Quit", #selector(quit), "q")] {
@@ -266,8 +296,9 @@ final class Bar: NSObject, NSMenuDelegate {
         if let plan = p.plan_label, !plan.isEmpty { who += " (\(plan))" }
         out.append(text(who + "\n", 11, .regular, .secondaryLabelColor))
 
-        guard p.status == "ok" else {
-            let hint = p.needs_login ? p.status + " — click to log in" : p.status
+        guard !p.limits.isEmpty else {
+            var hint = p.detail ?? p.status
+            if p.needs_login { hint += " — click to log in" }
             out.append(text("     " + hint, 11, .regular, .systemRed))
             return out
         }
@@ -275,10 +306,10 @@ final class Bar: NSObject, NSMenuDelegate {
         out.append(text("     ", 11))
         for (i, l) in p.limits.enumerated() {
             if i > 0 { out.append(text(" · ", 11, .regular, .tertiaryLabelColor)) }
-            out.append(digits("\(shortLabel(l)) \(l.percent)%", 11, color(l.level)))
+            out.append(digits("\(l.short_label) \(l.percent)%", 11, color(l.level)))
         }
         if let session = p.limits.first(where: { $0.kind == "session" }) {
-            out.append(text("  ↻ \(duration(session.resets_in_sec))", 11,
+            out.append(text("  ↻ \(countdown(to: session.resets_at_epoch))", 11,
                             .regular, .secondaryLabelColor))
         }
         // `/limit-reset` is only open on some accounts: say which.
@@ -322,7 +353,7 @@ final class Bar: NSObject, NSMenuDelegate {
     @objc func switchTo(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         inBackground {
-            let (code, _) = run("/usr/bin/env", ["claudini", "use", name])
+            let (code, _) = run("/usr/bin/env", ["python3", helper, "--switch", name])
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 if code == 0 {
@@ -337,6 +368,14 @@ final class Bar: NSObject, NSMenuDelegate {
                 alert.runModal()
                 self.reload()
             }
+        }
+    }
+
+    @objc func setMode(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        inBackground {
+            run("/usr/bin/env", ["python3", helper, "--mode", name])
+            DispatchQueue.main.async { self.reload() }
         }
     }
 

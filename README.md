@@ -8,7 +8,7 @@ account. It does not tell you *which* account you should switch to. This is the
 missing half: live usage for every profile, and a policy that picks for you.
 
 ```
- claudini  using: personal      auto: ON      next: side — Fable spent here, available on side
+ claudini   auto: ON   mode: endurance   next: side — resets in 22h, spend it before it is lost
 
   #  profile         account                workspace   plan      session week   Fable  reset   ⟲
  ●1  personal        you@example.com        personal    max 20x      18%   64%   100%   4h36   ⟲
@@ -42,7 +42,13 @@ Anthropic subscriptions have two kinds of limit: general ones (a 5-hour session
 window and a weekly window) and per-model weekly quotas — the one for Fable runs
 out well before the others if that's what you use.
 
-The policy is *stay on a model, then fall back*:
+There are two ways to be optimal, because there are two different goals, so
+there are two modes. Switch with `m` in the console, from the menu bar, or
+`claudini-usage --mode model|endurance`.
+
+### `model` — keep the preferred model available
+
+The default. The policy is *stay on a model, then fall back*:
 
 1. Prefer an account that still has the target model available (Fable by default)
    — but only among accounts on the largest plan you have. A team seat with
@@ -66,6 +72,23 @@ the reason it's better, and — when nothing is moving — what is holding the
 switch back ("auto-switching is off", "cooldown, 4 min left", "current account
 is not blocked yet"). That decision is made once, in the engine; the interfaces
 only spell it out.
+
+### `endurance` — never stop working
+
+For when you don't need Fable and just want to keep going. A weekly allowance
+that resets tonight is worth nothing kept; one that resets in five days is a
+reserve. So this mode spends the account whose weekly window **resets soonest**,
+and among accounts resetting together takes the one with the most room so the
+next wall is furthest away.
+
+The difference is not only which account wins but *when* it switches. `model`
+moves only once the current account is blocked. `endurance` moves as soon as
+another account's allowance is closer to expiring, because waiting is exactly
+how that allowance gets wasted — still bounded by the cooldown, so it doesn't
+churn.
+
+Both modes ignore accounts whose general limits are already spent, and both say
+what they are doing: *"license resets in 22h34, spend it before it is lost"*.
 
 Auto-switching is **off** by default. Turn it on with `a` in the console, from
 the menu bar, or `claudini-usage --auto on`.
@@ -110,10 +133,26 @@ is found by diffing the keychain entries around the login rather than computed.
 ## Rate limits
 
 Reading usage for several accounts at once will get you a 429 if you sweep them
-too eagerly. So: at most three requests in flight, successful reads are reused
-for 45 seconds, an account that fails to refresh is left alone for 15 minutes,
-and a 429 mutes the API entirely for three minutes while everything is served
-from cache. All three interfaces say when that's happening and for how long.
+too eagerly, so the cache is deliberately tuned against the poll period rather
+than against a round number.
+
+**The cache TTL sits just below the poll period.** A poller waking at `P` always
+finds its own row too old and refetches, while a second interface polling out of
+phase lands inside the window and pays nothing. Set the TTL *above* `P` and
+nothing ever refetches; set it far below and the cache stops mattering at all.
+With the console and the menu bar both open that is one sweep per period instead
+of two.
+
+**A broken account backs off.** Each retry of an account that needs a login
+costs a token refresh that is bound to fail, against the endpoint that
+rate-limits fastest. So the delay doubles with each consecutive failure, from 15
+minutes up to 6 hours — roughly 34 retries a week instead of 670. Logging the
+account back in clears the entry, so a real fix is picked up on the very next
+pass however deep the backoff went.
+
+The rest: at most two requests in flight, and a 429 mutes the API entirely for
+three minutes while everything is served from cache. All three interfaces say
+when that is happening and for how long.
 
 ## Install
 
@@ -137,8 +176,9 @@ claudini-usage --json          # machine-readable, used by the menu bar app
 claudini-usage --switch NAME   # switch (wraps `claudini use`)
 claudini-usage --reconnect NAME  # OAuth login for one profile, active account untouched
 claudini-usage --auto on|off   # arm or disarm auto-switching
+claudini-usage --mode model|endurance   # which goal the policy optimises for
 claudini-usage --tick          # run one auto-switch decision now
-claudini-auto                  # the console: a auto · r refresh · 1-9 switch · q quit
+claudini-auto                  # the console: a auto · m mode · r refresh · 1-9 switch · q quit
 ```
 
 Tuning lives in `~/.claudini/auto.json`:
@@ -146,6 +186,7 @@ Tuning lives in `~/.claudini/auto.json`:
 | key | default | meaning |
 |---|---|---|
 | `enabled` | `false` | auto-switching armed |
+| `mode` | `model` | `model` keeps Fable available, `endurance` spends what resets soonest |
 | `min_margin` | `5` | % of general headroom below which an account counts as spent |
 | `cooldown_min` | `10` | minutes between two automatic switches |
 
