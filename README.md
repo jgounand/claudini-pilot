@@ -10,11 +10,16 @@ missing half: live usage for every profile, and a policy that picks for you.
 ```
  claudini  actif: work          auto: ACTIF        → personal
 
-  #  profil          compte                       session   semaine    Fable   reset    ⟲
- ●1  personal        you@example.com                 63%       72%      100%    3h47     ⟲
-  2  work            work@example.com               100%       42%       70%    1h57     ⟲
-  3  side            me@example.com                 100%       16%        —    57min
+  #  profil          compte                   espace         session  semaine   Fable   reset   ⟲
+ ●1  personal        you@example.com          perso            63%      72%     100%    3h47    ⟲
+  2  work            you@example.com          Acme Inc         100%     42%      70%    1h57
+  3  side            me@example.com           perso            reconnexion requise
 ```
+
+Rows 1 and 2 are the *same account* in two different workspaces — different
+subscriptions, different limits, and only one of them has `/limit-reset`. The
+email alone can't tell them apart, so the workspace is shown next to it, read
+from the API rather than from local config (which another session can overwrite).
 
 ## What you get
 
@@ -68,6 +73,26 @@ another wall.
 
 Availability is decided server-side; this only reports what your client was
 told. It cannot grant the command on an account that does not have it.
+
+## When an account needs a new login
+
+An account whose refresh token has expired shows `reconnexion requise`. Click it
+in the menu bar, or press its number in the console, and you get an OAuth login
+for **that** account — without leaving your active account behind.
+
+The login itself has to happen in the active slot, so the flow puts the target
+profile there, runs `claude auth login`, files the fresh credentials into that
+profile's keychain entry, and puts your original account back. That happens even
+if the login fails or you hit Ctrl-C. Don't start a new `claude` session in
+another terminal during the login — it would write into the wrong profile.
+
+## Rate limits
+
+Reading usage for several accounts at once will get you a 429 if you sweep them
+too eagerly. So: at most three requests in flight, successful reads are reused
+for 45 seconds, an account that fails to refresh is left alone for 15 minutes,
+and a 429 mutes the API entirely for three minutes while everything is served
+from cache. All three interfaces say when that's happening and for how long.
 
 ## Install
 

@@ -21,6 +21,8 @@ struct Profile: Decodable {
     let status: String
     let limits: [Limit]
     let limit_reset: Bool?
+    let space: String?
+    let plan: String?
 }
 
 struct Snapshot: Decodable {
@@ -28,6 +30,7 @@ struct Snapshot: Decodable {
     let profiles: [Profile]
     let auto: Bool
     let suggestion: String?
+    let throttled_for: Int?
 }
 
 // MARK: - shell
@@ -186,15 +189,24 @@ final class Bar: NSObject, NSMenuDelegate {
         }
 
         for p in snap.profiles {
-            let mi = NSMenuItem(title: p.name, action: #selector(switchTo(_:)), keyEquivalent: "")
+            let needsLogin = p.status != "ok" && p.status != "rate limited"
+            let mi = NSMenuItem(title: p.name,
+                                action: needsLogin ? #selector(reconnect(_:)) : #selector(switchTo(_:)),
+                                keyEquivalent: "")
             mi.target = self
             mi.representedObject = p.name
             mi.attributedTitle = row(p)
-            mi.isEnabled = !p.active
+            mi.isEnabled = !p.active || needsLogin
             menu.addItem(mi)
         }
 
         menu.addItem(.separator())
+        if let pause = snap.throttled_for, pause > 0 {
+            let notice = NSMenuItem(title: "API en pause \(pause)s — affichage depuis le cache",
+                                    action: nil, keyEquivalent: "")
+            notice.isEnabled = false
+            menu.addItem(notice)
+        }
         let auto = NSMenuItem(title: snap.auto ? "Bascule auto : ACTIVE" : "Bascule auto : inactive",
                               action: #selector(toggleAuto), keyEquivalent: "a")
         auto.target = self
@@ -218,13 +230,19 @@ final class Bar: NSObject, NSMenuDelegate {
         out.append(NSAttributedString(string: "\(mark) \(p.name)", attributes: [
             .font: NSFont.systemFont(ofSize: 13, weight: p.active ? .bold : .regular),
         ]))
-        out.append(NSAttributedString(string: "  \(p.email ?? "?")\n", attributes: [
+        // Deux profils peuvent porter le même email dans deux organisations
+        // différentes : sans l'espace, la ligne est ambiguë.
+        var who = "  \(p.email ?? "?")"
+        if let space = p.space { who += "  ·  \(space)" }
+        if let plan = p.plan, !plan.isEmpty { who += " (\(plan))" }
+        out.append(NSAttributedString(string: who + "\n", attributes: [
             .font: NSFont.systemFont(ofSize: 11),
             .foregroundColor: NSColor.secondaryLabelColor,
         ]))
 
         if p.status != "ok" {
-            out.append(NSAttributedString(string: "     \(p.status)", attributes: [
+            let hint = p.status == "rate limited" ? p.status : p.status + " — cliquer pour reconnecter"
+            out.append(NSAttributedString(string: "     " + hint, attributes: [
                 .font: NSFont.systemFont(ofSize: 11),
                 .foregroundColor: NSColor.systemRed,
             ]))
@@ -262,6 +280,15 @@ final class Bar: NSObject, NSMenuDelegate {
     }
 
     // MARK: actions
+
+    /// Le login OAuth a besoin d'un vrai terminal : on en ouvre un.
+    @objc func reconnect(_ sender: NSMenuItem) {
+        guard let name = sender.representedObject as? String else { return }
+        let cmd = "claudini-usage --reconnect \(name)"
+        run("/usr/bin/osascript", ["-e",
+            "tell application \"Terminal\" to do script \"\(cmd)\"",
+            "-e", "tell application \"Terminal\" to activate"])
+    }
 
     @objc func switchTo(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }

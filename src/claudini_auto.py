@@ -45,10 +45,14 @@ class Console:
             if moved:
                 rows = cu.collect()          # l'actif a changé, on relit
                 msg = "bascule auto : " + msg
+        left = cu.throttled_for()
         with self.lock:
             self.rows = rows
             self.state = cu.load_state()
-            self.message = msg or time.strftime("mis à jour à %H:%M:%S")
+            if left:
+                self.message = "API en pause %ds (429) — affichage depuis le cache" % left
+            else:
+                self.message = msg or time.strftime("mis à jour à %H:%M:%S")
             self.busy = False
 
     def loop(self):
@@ -64,6 +68,23 @@ class Console:
             return curses.color_pair(2)
         return curses.color_pair(1)
 
+    @staticmethod
+    def clip(text, width):
+        """Tronque en le montrant : un email coupé net ressemble à un autre email."""
+        text = text or ""
+        return text if len(text) <= width else text[:width - 1] + "…"
+
+    @staticmethod
+    def put(scr, y, x, text, attr=0):
+        """addstr qui se tait au lieu de planter quand le terminal est étroit."""
+        h, w = scr.getmaxyx()
+        if y >= h or x >= w:
+            return
+        try:
+            scr.addstr(y, x, text[:w - x - 1], attr)
+        except curses.error:
+            pass
+
     def draw(self, scr):
         scr.erase()
         h, w = scr.getmaxyx()
@@ -75,52 +96,80 @@ class Console:
 
         # en-tête
         auto_on = state["enabled"]
-        scr.addstr(0, 0, " claudini ", curses.A_REVERSE | curses.A_BOLD)
-        scr.addstr(0, 11, "actif: ")
-        scr.addstr(active["name"] if active else "?", curses.A_BOLD)
-        scr.addstr(0, 40, "auto: ")
-        scr.addstr("ACTIF  " if auto_on else "inactif",
-                   curses.color_pair(1) | curses.A_BOLD if auto_on else curses.A_DIM)
+        self.put(scr, 0, 0, " claudini ", curses.A_REVERSE | curses.A_BOLD)
+        self.put(scr, 0, 11, "actif: " + (active["name"] if active else "?"), curses.A_BOLD)
+        self.put(scr, 0, 40, "auto: " + ("ACTIF" if auto_on else "inactif"),
+                 curses.color_pair(1) | curses.A_BOLD if auto_on else curses.A_DIM)
         if target and active and target["name"] != active["name"]:
-            scr.addstr(0, 60, "→ %s" % target["name"], curses.color_pair(2))
+            self.put(scr, 0, 60, "→ %s" % target["name"], curses.color_pair(2))
 
         y = 2
-        scr.addstr(y, 0, "  #  profil          compte                       session   semaine    Fable   reset    ⟲",
-                   curses.A_DIM)
+        self.put(scr, y, 0,
+                 "  #  profil          compte                   espace         "
+                 "session   semaine    Fable   reset   ⟲", curses.A_DIM)
         y += 1
 
         for i, p in enumerate(rows, 1):
             if y >= h - 3:
                 break
             mark = "●" if p["active"] else " "
-            scr.addstr(y, 0, " %s%d " % (mark, i), curses.A_BOLD if p["active"] else 0)
-            scr.addstr(y, 5, p["name"][:15], curses.A_BOLD if p["active"] else 0)
-            scr.addstr(y, 21, (p["email"] or "?")[:28], curses.A_DIM)
+            bold = curses.A_BOLD if p["active"] else 0
+            self.put(scr, y, 0, " %s%d " % (mark, i), bold)
+            self.put(scr, y, 5, self.clip(p["name"], 15), bold)
+            self.put(scr, y, 21, self.clip(p["email"] or "?", 24), curses.A_DIM)
+            # `personal` et `team-seat` ont le même email : c'est l'espace qui
+            # les distingue.
+            self.put(scr, y, 46, self.clip(p.get("space"), 14),
+                     curses.A_DIM if p.get("space") == "perso" else curses.A_BOLD)
 
             if p["status"] != "ok":
                 note = p["status"] + (" (cache)" if p.get("cached") else "")
-                scr.addstr(y, 51, note[:28], curses.color_pair(3))
+                self.put(scr, y, 62, note, curses.color_pair(3))
                 y += 1
                 continue
 
-            cols = {"session": 51, "weekly_all": 61}
+            cols = {"session": 62, "weekly_all": 72}
             for limit in p["limits"]:
-                col = cols.get(limit["kind"], 71)
+                col = cols.get(limit["kind"], 82)
                 if limit["kind"] not in cols and limit["label"].lower() != "fable":
                     continue
-                scr.addstr(y, col, "%3d%%" % limit["percent"], self.pair(limit["percent"]))
+                self.put(scr, y, col, "%3d%%" % limit["percent"], self.pair(limit["percent"]))
             reset = next((l["resets_at"] for l in p["limits"] if l["kind"] == "session"), None)
-            scr.addstr(y, 79, cu.until(reset)[:8], curses.A_DIM)
+            self.put(scr, y, 90, cu.until(reset)[:7], curses.A_DIM)
             if p.get("limit_reset"):
-                scr.addstr(y, 88, "⟲", curses.color_pair(1))
+                self.put(scr, y, 98, "⟲", curses.color_pair(1))
             y += 1
 
         # pied de page
-        scr.addstr(h - 2, 0, ("⏳ " if busy else "   ") + message[:w - 4], curses.A_DIM)
-        scr.addstr(h - 1, 0,
-                   " a auto · r rafraîchir · 1-9 basculer · q quitter    ⟲ = /limit-reset dispo ",
-                   curses.A_REVERSE)
+        self.put(scr, h - 2, 0, ("⏳ " if busy else "   ") + message, curses.A_DIM)
+        self.put(scr, h - 1, 0,
+                 " a auto · r rafraîchir · 1-9 basculer ou reconnecter · q quitter   ⟲ = /limit-reset ",
+                 curses.A_REVERSE)
         scr.refresh()
+
+    def reconnect(self, scr, name):
+        """Rend la main au terminal le temps du login OAuth, puis reprend."""
+        h, _ = scr.getmaxyx()
+        self.put(scr, h - 2, 0,
+                 " %s doit être reconnecté — [l] login, autre touche pour annuler " % name,
+                 curses.A_REVERSE)
+        scr.refresh()
+        scr.nodelay(False)
+        try:
+            answer = scr.getkey()
+        finally:
+            scr.nodelay(True)
+        if answer not in ("l", "L"):
+            with self.lock:
+                self.message = "reconnexion annulée"
+            return
+
+        curses.endwin()
+        cu.reconnect(name)
+        input("\nEntrée pour revenir à la console…")
+        scr.clear()
+        curses.doupdate()
+        threading.Thread(target=lambda: self.refresh(run_auto=False), daemon=True).start()
 
     # --- boucle clavier ------------------------------------------------------
 
@@ -159,12 +208,18 @@ class Console:
             elif key.isdigit() and key != "0":
                 idx = int(key) - 1
                 with self.lock:
-                    name = self.rows[idx]["name"] if idx < len(self.rows) else None
-                if name:
-                    ok = cu.switch(name)
+                    row = self.rows[idx] if idx < len(self.rows) else None
+                if row is None:
+                    continue
+                # Un compte à reconnecter n'a pas besoin d'une bascule mais
+                # d'un login : on propose celui-là.
+                if row["status"] != "ok" and row["status"] != cu.RATE_LIMITED:
+                    self.reconnect(scr, row["name"])
+                else:
+                    ok = cu.switch(row["name"])
                     with self.lock:
                         self.message = ("bascule sur %s — relance `claude` dans tes terminaux"
-                                        % name) if ok else "échec de la bascule sur %s" % name
+                                        % row["name"]) if ok else "échec de la bascule"
                     threading.Thread(target=lambda: self.refresh(run_auto=False),
                                      daemon=True).start()
 

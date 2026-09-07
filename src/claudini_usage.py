@@ -28,6 +28,7 @@ PROFILES_DIR = os.path.join(CLAUDINI_HOME, "profiles")
 CONFIG = os.path.join(CLAUDINI_HOME, "config.json")
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
+BOOTSTRAP_URL = "https://api.anthropic.com/api/claude_cli/bootstrap"
 REFRESH_URL = "https://console.anthropic.com/v1/oauth/token"
 # client_id public de Claude Code (visible dans l'URL de login OAuth)
 CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
@@ -47,9 +48,11 @@ DEFAULT_STATE = {
     "last_switch_to": None,
 }
 
-# Un compte qui refuse de se rafraîchir le refera au prochain quart d'heure,
-# pas à chaque tick : l'endpoint de refresh est vite rate-limité.
-FAIL_TTL = 15 * 60
+SUCCESS_TTL = 45       # une lecture réussie reste servie telle quelle ce temps
+ORG_TTL = 24 * 3600    # l'organisation d'un compte ne bouge pas : relue une fois par jour
+FAIL_TTL = 15 * 60     # un compte en échec n'est pas réessayé avant
+THROTTLE_SEC = 180     # après un 429, on ne touche plus du tout à l'API
+RATE_LIMITED = "rate limited"
 
 
 def load_state():
@@ -69,26 +72,30 @@ def save_state(state):
     os.replace(tmp, STATE_FILE)
 
 
-CACHE_VERSION = 2
+CACHE_VERSION = 3
+EMPTY_CACHE = {"profiles": {}, "orgs": {}, "throttled_until": 0}
 
 
 def load_cache():
-    """Cache des lectures ratées. Estampillé : une entrée d'une version
-    antérieure n'a pas les mêmes champs, on la jette."""
+    """Dernière lecture connue de chaque profil, plus la date jusqu'à laquelle
+    l'API nous a demandé de nous taire. Estampillé : une entrée écrite par une
+    version antérieure n'a pas les mêmes champs, on la jette."""
     try:
         with open(CACHE_FILE) as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
-        return {}
+        return dict(EMPTY_CACHE)
     if data.get("version") != CACHE_VERSION:
-        return {}
-    return data.get("profiles", {})
+        return dict(EMPTY_CACHE)
+    return {"profiles": data.get("profiles", {}),
+            "orgs": data.get("orgs", {}),
+            "throttled_until": data.get("throttled_until", 0)}
 
 
 def save_cache(cache):
     tmp = CACHE_FILE + ".tmp"
     with open(tmp, "w") as f:
-        json.dump({"version": CACHE_VERSION, "profiles": cache}, f)
+        json.dump(dict(cache, version=CACHE_VERSION), f)
     os.replace(tmp, CACHE_FILE)
 
 
@@ -184,7 +191,7 @@ def refresh(service, creds):
                 "client_id": CLIENT_ID,
             })
         except urllib.error.HTTPError as e:
-            return None, "rate limited, reessayer" if e.code == 429 else "reconnexion requise"
+            return None, RATE_LIMITED if e.code == 429 else "reconnexion requise"
         except Exception:
             return None, "refresh injoignable"
 
@@ -195,6 +202,27 @@ def refresh(service, creds):
         oauth["expiresAt"] = int((dt.datetime.now().timestamp() + new["expires_in"]) * 1000)
     keychain_write(service, creds)
     return oauth["accessToken"], None
+
+
+def fetch_org(token):
+    """Organisation et formule réelles du compte.
+
+    Le claude.json d'un profil contient bien un nom d'organisation, mais il
+    peut avoir été écrasé par une session tournant sur un autre profil : seul
+    le serveur fait foi.
+    """
+    try:
+        acct = (http_json(BOOTSTRAP_URL, token=token) or {}).get("oauth_account") or {}
+    except Exception:
+        return None
+    org, email = acct.get("organization_name"), acct.get("account_email")
+    # "<email>'s Organization" = l'espace personnel, pas une vraie organisation.
+    personal = bool(org and email and org.startswith(email))
+    return {
+        "org": org,
+        "space": "perso" if personal else org,
+        "plan": (acct.get("organization_type") or "").replace("claude_", ""),
+    }
 
 
 def fetch(name, is_active):
@@ -234,12 +262,27 @@ def fetch(name, is_active):
             except Exception:
                 out["status"] = "reconnexion requise"
                 return out
+        elif e.code == 429:
+            out["status"] = RATE_LIMITED
+            return out
         else:
             out["status"] = "erreur HTTP %d" % e.code
             return out
     except Exception as e:
         out["status"] = "injoignable (%s)" % type(e).__name__
         return out
+
+    known = load_cache().get("orgs", {}).get(name)
+    if known and dt.datetime.now().timestamp() - known["at"] < ORG_TTL:
+        out.update(known["info"])
+    else:
+        info = fetch_org(token)
+        if info:
+            out.update(info)
+            cache = load_cache()
+            cache.setdefault("orgs", {})[name] = {"at": dt.datetime.now().timestamp(),
+                                                  "info": info}
+            save_cache(cache)
 
     for lim in data.get("limits") or []:
         scope = (lim.get("scope") or {}).get("model") or {}
@@ -265,27 +308,62 @@ def fetch(name, is_active):
 
 
 def collect():
-    """Conso de tous les profils. Les comptes en échec sont mis en quarantaine
-    FAIL_TTL secondes pour ne pas marteler l'endpoint de refresh."""
+    """Conso de tous les profils, en tapant sur l'API le moins possible.
+
+    Une lecture réussie est resservie pendant SUCCESS_TTL, un compte en échec
+    est laissé tranquille FAIL_TTL, et si l'API a renvoyé un 429 on ne
+    l'appelle plus du tout tant que le garde-fou n'est pas expiré.
+    """
     act = active_profile()
     cache = load_cache()
+    entries = cache["profiles"]
     now = dt.datetime.now().timestamp()
+    muted = now < cache["throttled_until"]
 
-    def one(name):
-        cached = cache.get(name)
-        if (cached and cached.get("status") != "ok"
-                and now - cached.get("at", 0) < FAIL_TTL and name != act):
-            row = dict(cached["row"])
-            row["cached"] = True
-            return row
-        row = fetch(name, name == act)
-        cache[name] = {"at": now, "status": row["status"], "row": row}
+    def cached_row(name):
+        entry = entries.get(name)
+        if not entry:
+            return None
+        row = dict(entry["row"])
+        row["cached"] = True
+        row["age"] = int(now - entry["at"])
+        row["active"] = (name == act)
         return row
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        rows = list(pool.map(one, profiles()))
+    def one(name):
+        entry = entries.get(name)
+        if entry:
+            age = now - entry["at"]
+            fresh_ok = entry["status"] == "ok" and age < SUCCESS_TTL
+            failed_recently = entry["status"] != "ok" and age < FAIL_TTL
+            if muted or fresh_ok or failed_recently:
+                return cached_row(name)
+        if muted:
+            email, org, reset = profile_meta(name)
+            return {"name": name, "email": email, "org": org, "active": name == act,
+                    "limit_reset": reset, "status": RATE_LIMITED, "limits": [],
+                    "muted": True}
+        row = fetch(name, name == act)
+        entries[name] = {"at": now, "status": row["status"], "row": row}
+        return row
+
+    # Trois requêtes en vol suffisent : au-delà l'API nous claque la porte.
+    with concurrent.futures.ThreadPoolExecutor(max_workers=3) as pool:
+        rows = [r for r in pool.map(one, profiles()) if r]
+
+    # Seul un vrai 429 réarme le garde-fou : une ligne resservie depuis le
+    # cache pendant la pause le prolongerait indéfiniment.
+    if any(r["status"] == RATE_LIMITED and not r.get("muted") and not r.get("cached")
+           for r in rows):
+        cache["throttled_until"] = now + THROTTLE_SEC
     save_cache(cache)
     return rows
+
+
+def throttled_for():
+    """Secondes restantes avant de pouvoir réinterroger l'API. 0 si libre."""
+    left = load_cache()["throttled_until"] - dt.datetime.now().timestamp()
+    return max(0, int(left))
 
 
 # --- politique de bascule ----------------------------------------------------
@@ -347,6 +425,57 @@ def switch(name):
                           capture_output=True, text=True).returncode == 0
 
 
+def reconnect(name):
+    """Refait le login OAuth d'un profil sans changer de compte actif.
+
+    Le login se fait forcément dans le slot actif : on note le profil courant,
+    on met le profil à reconnecter en place le temps du login, on range
+    nous-mêmes les credentials fraîches dans son entrée de trousseau, puis on
+    remet le slot d'origine — y compris si le login échoue ou si tu fais
+    Ctrl-C en plein milieu.
+    """
+    previous = active_profile()
+    known = name in profiles()
+
+    print("\033[1mReconnexion de %s\033[0m" % name)
+    if previous and previous != name:
+        print("Le compte actif (%s) sera remis en place à la fin." % previous)
+    print("\033[33mPendant le login, ne lance pas de nouvelle session `claude` "
+          "dans un autre terminal : elle écrirait dans le mauvais profil.\033[0m\n")
+
+    try:
+        if not known:
+            # Profil inconnu : claudini sait le créer et lancer le login.
+            subprocess.run(["claudini", "profile", "add", name, "--login"])
+        else:
+            if previous != name and not switch(name):
+                print("\033[31mImpossible de passer sur %s.\033[0m" % name)
+                return
+            subprocess.run(["claude", "auth", "login"])
+            # On range les credentials nous-mêmes plutôt que de parier sur ce
+            # que claudini enregistre en quittant le profil.
+            creds = keychain_read("Claude Code-credentials")
+            if creds and "claudeAiOauth" in creds:
+                keychain_write("claudini-profile-" + name, creds)
+                print("credentials de %s enregistrées" % name)
+            else:
+                print("\033[31mAucune credential lisible après le login.\033[0m")
+    except KeyboardInterrupt:
+        print("\ninterrompu")
+    finally:
+        if previous and active_profile() != previous:
+            print("\nRetour sur %s…" % previous)
+            if not switch(previous):
+                print("\033[31mLe retour sur %s a échoué — fais `claudini use %s`.\033[0m"
+                      % (previous, previous))
+
+        # La lecture en cache de ce profil ne vaut plus rien.
+        cache = load_cache()
+        cache["profiles"].pop(name, None)
+        cache.get("orgs", {}).pop(name, None)
+        save_cache(cache)
+
+
 def auto_tick(rows=None, force=False):
     """Un tour de la boucle auto. Renvoie (a_bascule, message)."""
     state = load_state()
@@ -400,9 +529,16 @@ def bar(pct):
 
 
 def render(rows):
+    left = throttled_for()
+    if left:
+        print("\033[33mAPI en pause %ds (429) — affichage depuis le cache\033[0m\n" % left)
     for r in rows:
         mark = "●" if r["active"] else "○"
-        head = "%s %-14s %s" % (mark, r["name"], r["email"] or "?")
+        space = r.get("space")
+        head = "%s %-14s %s%s" % (mark, r["name"], r["email"] or "?",
+                                  ("  ·  %s" % space) if space else "")
+        if r.get("plan"):
+            head += " (%s)" % r["plan"]
         print("\033[1m%s\033[0m" % head)
         if r["status"] != "ok":
             print("    %s" % r["status"])
@@ -426,6 +562,10 @@ def main():
 
     if args and args[0] == "--switch":
         sys.exit(0 if switch(args[1]) else 1)
+
+    if args and args[0] == "--reconnect":
+        reconnect(args[1])
+        return
 
     if args and args[0] == "--auto":            # --auto on | off | status
         state = load_state()
@@ -451,7 +591,8 @@ def main():
         state = load_state()
         target = pick_target(rows, state["min_margin"])
         json.dump({"active": active_profile(), "profiles": rows,
-                   "auto": state["enabled"], "suggestion": target["name"] if target else None},
+                   "auto": state["enabled"], "throttled_for": throttled_for(),
+                   "suggestion": target["name"] if target else None},
                   sys.stdout)
     else:
         render(rows)
