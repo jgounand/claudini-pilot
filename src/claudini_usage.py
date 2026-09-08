@@ -1431,6 +1431,8 @@ def for_json(rows, state, plan=None):
     """
     target, why, blocked = plan or plan_switch(rows, state)
     pause = throttled_for()
+    put_off = staying(rows, (target, why, blocked))
+    preferred = {r["name"]: preferred_limit(r) for r in rows}
     return {
         "profiles": [{
             "name": r["name"],
@@ -1455,7 +1457,7 @@ def for_json(rows, state, plan=None):
                 # The app groups on these rather than restating which kinds
                 # are general and which limit is the preferred model.
                 "general": l["kind"] in GENERAL_KINDS,
-                "preferred": l is preferred,
+                "preferred": l is preferred[r["name"]],
             } for l in r["limits"]],
         } for r in ranked(rows, state)],
         "auto": state["enabled"],

@@ -11,6 +11,7 @@ row. The I/O around them is exercised by using the tool.
 
 import datetime as dt
 import importlib.util
+import json
 import os
 import sys
 import unittest
@@ -254,6 +255,58 @@ class Reporting(unittest.TestCase):
         self.assertEqual(cu.until(90 * 60), "1h30")
         self.assertEqual(cu.until(3 * 86400), "3d")
         self.assertEqual(cu.until(None), "")
+
+
+class Contract(unittest.TestCase):
+    """for_json is what the menu bar decodes. Nothing else exercised it, so a
+    typo in it broke the app while the table and every test stayed green."""
+
+    def snapshot(self, rows=None, **over):
+        rows = rows or [account("here", session=20, model=40, active=True),
+                        account("other", session=60),
+                        account("broken", status=cu.NEEDS_LOGIN)]
+        return cu.for_json(rows, state(**over))
+
+    def test_it_serialises(self):
+        json.dumps(self.snapshot())          # would raise on a non-JSON value
+
+    def test_every_key_the_app_decodes_is_present(self):
+        snap = self.snapshot()
+        for key in ("profiles", "auto", "fleet", "actions", "mode", "modes",
+                    "show_saturated", "throttle_notice", "poll_after_sec", "next"):
+            self.assertIn(key, snap, key)
+        for key in ("name", "email", "active", "status", "detail", "limits",
+                    "limit_reset", "needs_login", "space", "plan_label",
+                    "binding", "saturated"):
+            self.assertIn(key, snap["profiles"][0], key)
+        for key in ("short_label", "percent", "level", "resets_at_epoch",
+                    "general", "preferred"):
+            self.assertIn(key, snap["profiles"][0]["limits"][0], key)
+        for key in ("name", "reason", "blocked_by", "staying", "after"):
+            self.assertIn(key, snap["next"], key)
+
+    def test_detail_is_never_null(self):
+        """The app prints it without a fallback."""
+        for profile in self.snapshot()["profiles"]:
+            self.assertTrue(profile["detail"], profile["name"])
+
+    def test_limits_are_tagged_for_the_app_to_group_on(self):
+        row = next(p for p in self.snapshot()["profiles"] if p["limits"])
+        self.assertEqual([l["short_label"] for l in row["limits"] if l["general"]],
+                         ["5h", "7d"])
+        self.assertEqual([l["short_label"] for l in row["limits"] if l["preferred"]],
+                         [cu.PREFERRED_MODEL])
+
+    def test_profiles_come_back_in_policy_order(self):
+        snap = self.snapshot()
+        self.assertTrue(snap["profiles"][0]["active"])
+        self.assertEqual(snap["profiles"][-1]["name"], "broken")
+
+    def test_a_supplied_plan_is_not_recomputed(self):
+        rows = [account("here", active=True), account("other", session=40)]
+        plan = (rows[1], "because I said so", None)
+        self.assertEqual(cu.for_json(rows, state(), plan)["next"]["reason"],
+                         "because I said so")
 
 
 class Settings(unittest.TestCase):
