@@ -196,6 +196,8 @@ claudini-usage --add NAME      # save the credentials in use now as a new profil
 claudini-usage --rename OLD NEW
 claudini-usage --remove NAME   # refuses while the profile is in use
 claudini-usage --force         # re-read now, skipping the per-account waiting periods
+claudini-usage --history       # write and open the usage history page
+claudini-usage --actions       # the command list, as JSON (what the menu shows)
 claudini-usage --auto on|off   # arm or disarm auto-switching
 claudini-usage --mode model|endurance   # which goal the policy optimises for
 claudini-usage --tick          # run one auto-switch decision now
@@ -258,6 +260,18 @@ no policy of its own.
 
 Nothing is sent anywhere else. Credentials never leave the keychain and those
 two API calls.
+
+## History
+
+Every read samples what each account looks like into `~/.claudini/history.jsonl`
+— at most once every five minutes, trimmed to thirty days — and every automatic
+switch is logged beside it with the reason. `claudini-usage --history`, or
+**History…** in the menu bar, turns that into a self-contained page: one line
+per account for the five-hour window, another for the weekly, and a table of
+the switches.
+
+Nothing is sent anywhere; the page is a local file with its charts drawn as
+inline SVG.
 
 ## Tests
 

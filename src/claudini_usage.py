@@ -283,6 +283,60 @@ def merge_cache(mine):
         return disk
 
 
+HISTORY_FILE = os.path.join(CLAUDINI_HOME, "history.jsonl")
+HISTORY_DAYS = 30
+HISTORY_GAP = 5 * 60      # don't record the same picture twice in a row
+
+
+def record(entry):
+    """Append one line to the history, and keep it from growing forever.
+
+    Append-only and one JSON object per line, so two processes writing at once
+    interleave whole lines rather than corrupting each other — the file is a
+    log, not a document, and losing a sample costs nothing.
+    """
+    entry["at"] = int(dt.datetime.now().timestamp())
+    with guard("history"):
+        with open(HISTORY_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
+        if os.path.getsize(HISTORY_FILE) > 4 << 20:
+            trim_history()
+
+
+def trim_history():
+    cutoff = dt.datetime.now().timestamp() - HISTORY_DAYS * 86400
+    kept = [line for line in read_history(raw=True) if line.get("at", 0) >= cutoff]
+    with open(HISTORY_FILE, "w") as f:
+        for line in kept:
+            f.write(json.dumps(line) + "\n")
+
+
+def read_history(raw=False):
+    """Every sample still within the window, oldest first."""
+    try:
+        with open(HISTORY_FILE) as f:
+            lines = [json.loads(line) for line in f if line.strip()]
+    except (OSError, json.JSONDecodeError):
+        return []
+    if raw:
+        return lines
+    cutoff = dt.datetime.now().timestamp() - HISTORY_DAYS * 86400
+    return [line for line in lines if line.get("at", 0) >= cutoff]
+
+
+def record_usage(rows):
+    """Sample what every account looks like, at most every HISTORY_GAP."""
+    fresh = [r for r in rows if r["status"] == OK and r["limits"]]
+    if not fresh:
+        return
+    last = next((e for e in reversed(read_history()) if "usage" in e), None)
+    if last and dt.datetime.now().timestamp() - last["at"] < HISTORY_GAP:
+        return
+    record({"usage": {r["name"]: {l["kind"]: l["percent"] for l in r["limits"]}
+                      for r in fresh},
+            "active": (active_row(rows) or {}).get("name")})
+
+
 def forget(name):
     """Drop what we know about a profile, without clobbering the rest."""
     with guard("cache"):
@@ -698,6 +752,7 @@ def collect(force=False):
     if hit_limit.is_set():
         cache["throttled_until"] = now + THROTTLE_SEC
     merge_cache(cache)
+    record_usage(rows)
     return rows
 
 
@@ -1154,6 +1209,7 @@ def auto_tick(rows=None):
         return rows, False, "`claudini use %s` failed" % target["name"], plan
 
     update_state(last_switch=dt.datetime.now().timestamp())
+    record({"switch": {"from": active["name"], "to": target["name"], "why": why}})
     # Only the active account changed: no need to read everything again.
     for row in rows:
         row["active"] = (row["name"] == target["name"])
@@ -1365,6 +1421,7 @@ def for_json(rows, state, plan=None):
             } for l in r["limits"]],
         } for r in ranked(rows, state)],
         "auto": state["enabled"],
+        "actions": [{"command": c, "about": a} for c, a in ACTIONS],
         "fleet": fleet_line(fleet(rows, state)),
         "mode": state["mode"],
         "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
@@ -1385,6 +1442,117 @@ def for_json(rows, state, plan=None):
     }
 
 
+# Named once, so the help text, the menu and the code cannot drift apart.
+ACTIONS = [
+    ("", "what every account has left, as a table"),
+    ("--json", "the same, machine-readable"),
+    ("--force", "re-read now, skipping the per-account waiting periods"),
+    ("--switch NAME", "make that profile the active one"),
+    ("--reconnect NAME", "log a profile back in, active account untouched"),
+    ("--add NAME", "save the credentials in use now as a new profile"),
+    ("--rename OLD NEW", "rename a profile"),
+    ("--remove NAME", "delete a profile (refused while it is in use)"),
+    ("--auto on|off", "arm or disarm automatic switching"),
+    ("--mode model|endurance", "which goal the policy optimises for"),
+    ("--tick", "run one auto-switch decision now"),
+    ("--history", "write and open the usage history page"),
+]
+
+HISTORY_COLOURS = ["#4f9cf9", "#f2a541", "#4cc38a", "#e5534b", "#a371f7", "#3fb0b0"]
+
+
+def history_chart(samples, kind, accounts, colours, width=880, height=190):
+    """One SVG line chart: a account per line, time across, percent up."""
+    span = (samples[0]["at"], samples[-1]["at"])
+    reach = max(1, span[1] - span[0])
+    x = lambda at: 46 + (at - span[0]) / reach * (width - 60)
+    y = lambda pct: 12 + (100 - pct) / 100 * (height - 40)
+
+    parts = ['<svg viewBox="0 0 %d %d" role="img">' % (width, height)]
+    for pct in (0, 50, 100):
+        parts.append('<line class="grid" x1="46" x2="%d" y1="%.1f" y2="%.1f"/>'
+                     % (width - 14, y(pct), y(pct)))
+        parts.append('<text class="tick" x="38" y="%.1f">%d%%</text>' % (y(pct) + 4, pct))
+
+    for name in accounts:
+        points = [(x(s["at"]), y(s["usage"][name][kind]))
+                  for s in samples if name in s["usage"] and kind in s["usage"][name]]
+        if len(points) > 1:
+            parts.append('<polyline stroke="%s" points="%s"/>'
+                         % (colours[name],
+                            " ".join("%.1f,%.1f" % p for p in points)))
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+def write_history(path=None):
+    """A self-contained page: how full each account has been, and when the
+    policy moved between them."""
+    entries = read_history()
+    samples = [e for e in entries if "usage" in e]
+    path = path or os.path.join(CLAUDINI_HOME, "history.html")
+    if len(samples) < 2:
+        _write_page(path, "<p class='empty'>Not enough history yet — samples are "
+                          "taken as the tool reads your accounts. Come back later.</p>")
+        return path
+
+    accounts = sorted({name for s in samples for name in s["usage"]})
+    colours = {n: HISTORY_COLOURS[i % len(HISTORY_COLOURS)] for i, n in enumerate(accounts)}
+    switches = [e for e in entries if "switch" in e][-12:]
+
+    legend = "".join('<span><i style="background:%s"></i>%s</span>' % (colours[n], n)
+                     for n in accounts)
+    moves = "".join(
+        "<tr><td>%s</td><td>%s → <b>%s</b></td><td>%s</td></tr>"
+        % (dt.datetime.fromtimestamp(e["at"]).strftime("%d %b %H:%M"),
+           e["switch"]["from"], e["switch"]["to"], e["switch"].get("why", ""))
+        for e in reversed(switches))
+
+    body = """
+      <p class="meta">%d samples over %s · %d accounts</p>
+      <div class="legend">%s</div>
+      <h2>Five-hour window</h2>%s
+      <h2>Weekly window</h2>%s
+      <h2>Switches</h2>%s
+    """ % (len(samples),
+           until(samples[-1]["at"] - samples[0]["at"]) or "a moment",
+           len(accounts), legend,
+           history_chart(samples, "session", accounts, colours),
+           history_chart(samples, "weekly_all", accounts, colours),
+           "<table>%s</table>" % moves if moves else "<p class='empty'>None yet.</p>")
+    _write_page(path, body)
+    return path
+
+
+def _write_page(path, body):
+    page = """<!doctype html><meta charset="utf-8"><title>claudini-pilot history</title>
+<style>
+ :root { color-scheme: light dark; --ink:#1a1a1a; --dim:#6b6b6b; --line:#d8d8d8; --bg:#fbfbfa }
+ @media (prefers-color-scheme: dark) {
+   :root { --ink:#e8e8e6; --dim:#9a9a97; --line:#333; --bg:#151514 } }
+ body { margin:0; padding:32px; background:var(--bg); color:var(--ink);
+        font:14px/1.5 -apple-system, system-ui, sans-serif; max-width:940px }
+ h1 { font-size:19px; margin:0 0 4px } h2 { font-size:13px; font-weight:600;
+      text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:28px 0 8px }
+ .meta, .empty { color:var(--dim) } .empty { padding:24px 0 }
+ .legend { display:flex; flex-wrap:wrap; gap:14px; margin:14px 0 }
+ .legend span { display:flex; align-items:center; gap:6px; font-size:12px }
+ .legend i { width:11px; height:3px; border-radius:2px }
+ svg { width:100%%; height:auto; overflow:visible }
+ polyline { fill:none; stroke-width:1.8; stroke-linejoin:round; stroke-linecap:round }
+ .grid { stroke:var(--line); stroke-width:1 }
+ .tick { fill:var(--dim); font-size:10px; text-anchor:end }
+ table { border-collapse:collapse; font-size:13px; width:100%% }
+ td { padding:6px 10px 6px 0; border-bottom:1px solid var(--line); vertical-align:top }
+ td:first-child { color:var(--dim); white-space:nowrap }
+</style>
+<h1>claudini-pilot</h1>%s
+""" % body
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w") as f:
+        f.write(page)
+
+
 def main():
     args = sys.argv[1:]
     command = args[0] if args else None
@@ -1394,6 +1562,16 @@ def main():
 
     if command == "--reconnect":
         reconnect(args[1])
+        return
+
+    if command == "--history":
+        path = write_history()
+        print(path)
+        subprocess.run(["/usr/bin/open", path])
+        return
+
+    if command == "--actions":
+        json.dump([{"command": c, "about": a} for c, a in ACTIONS], sys.stdout)
         return
 
     if command in ("--add", "--rename", "--remove"):

@@ -66,11 +66,19 @@ struct Mode: Decodable {
     let title: String
 }
 
+/// The command line, described by the engine rather than retyped here — the
+/// list would otherwise drift the first time a command changed.
+struct Action: Decodable {
+    let command: String
+    let about: String
+}
+
 struct Snapshot: Decodable {
     let profiles: [Profile]
     let auto: Bool
     /// One line on whether the fleet as a whole is heading for an outage.
     let fleet: String
+    let actions: [Action]
     let mode: String
     let modes: [Mode]
     /// A spent model quota only means something while the policy protects it.
@@ -361,6 +369,29 @@ final class Bar: NSObject, NSMenuDelegate {
         modes.submenu = submenu
         menu.addItem(modes)
 
+        let history = NSMenuItem(title: "History…", action: #selector(showHistory),
+                                 keyEquivalent: "h")
+        history.target = self
+        menu.addItem(history)
+
+        // What the tool can do outside this menu. Clicking copies the command,
+        // which is the only thing anyone wants from a list like this.
+        let commands = NSMenuItem(title: "Command line", action: nil, keyEquivalent: "")
+        let list = NSMenu()
+        for action in snap.actions {
+            let mi = NSMenuItem(title: action.command, action: #selector(copyCommand(_:)),
+                                keyEquivalent: "")
+            mi.target = self
+            mi.representedObject = action.command
+            let line = NSMutableAttributedString(attributedString:
+                mono(pad("claudini-usage " + action.command, 30), 12))
+            line.append(mono(" " + action.about, 11, .regular, .secondaryLabelColor))
+            mi.attributedTitle = line
+            list.addItem(mi)
+        }
+        commands.submenu = list
+        menu.addItem(commands)
+
         for (title, action, key) in [("Refresh", #selector(refreshNow), "r"),
                                      ("Quit", #selector(quit), "q")] {
             let mi = NSMenuItem(title: title, action: action, keyEquivalent: key)
@@ -512,6 +543,18 @@ final class Bar: NSObject, NSMenuDelegate {
     @objc func toggleAuto() {
         let wanted = !(snapshot?.auto ?? false)
         ask(["--auto", wanted ? "on" : "off", "--json"])
+    }
+
+    /// The engine writes the page and opens it; it knows where it keeps the
+    /// history, and the app has no business guessing.
+    @objc func showHistory() {
+        inBackground { _ = engine(["--history"]) }
+    }
+
+    @objc func copyCommand(_ sender: NSMenuItem) {
+        guard let command = sender.representedObject as? String else { return }
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString("claudini-usage " + command, forType: .string)
     }
 
     @objc func refreshNow() { reload(force: true) }
