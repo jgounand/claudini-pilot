@@ -21,6 +21,7 @@ import contextlib
 import datetime as dt
 import fcntl
 import getpass
+import importlib.util
 import json
 import os
 import re
@@ -51,11 +52,21 @@ BETA = "oauth-2025-04-20"
 USER_AGENT = "claudini-pilot/1.0 (+https://github.com/jgounand/claudini-pilot)"
 
 ACCOUNT = getpass.getuser()
-LOCKS = collections.defaultdict(threading.Lock)
+
+# Guards must always be taken in this order. Re-taking one you already hold
+# deadlocks silently, and taking them out of order deadlocks two processes
+# against each other — both are the kind of bug that shows up once a month at
+# a customer's, so the rule is checked rather than described.
+GUARD_ORDER = {"switch": 1, "refresh": 2, "cache": 3, "state": 4, "history": 5}
+HELD = threading.local()
 
 
 def lock_path(name):
     return os.path.join(CLAUDINI_HOME, "%s.lock" % name)
+
+
+def _rank(name):
+    return GUARD_ORDER[name.split("-")[0]]
 
 
 @contextlib.contextmanager
@@ -68,18 +79,30 @@ def guard(name):
     another process holds a handle on that inode lets a third create a fresh
     one and lock a different file, so two holders think they are alone.
 
-    Re-taking the *same* guard would deadlock — flock blocks a second
-    acquisition even from the same process. Different guards may nest, always
-    in the order switch → cache → state, never the reverse.
+    flock is held per open file description and each entry opens its own, so
+    two threads of one process already exclude each other through it — no
+    second in-process lock is needed. Nesting is allowed but only in
+    GUARD_ORDER, which is asserted here so a mistake raises at the offending
+    line instead of hanging.
     """
+    held = getattr(HELD, "stack", None)
+    if held is None:
+        held = HELD.stack = []
+    if held and _rank(name) <= _rank(held[-1]):
+        raise RuntimeError("guard %r taken while holding %r — see GUARD_ORDER"
+                           % (name, held[-1]))
+
     os.makedirs(CLAUDINI_HOME, exist_ok=True)
-    with LOCKS[name]:
+    held.append(name)
+    try:
         with open(lock_path(name), "a") as handle:
             fcntl.flock(handle, fcntl.LOCK_EX)
             try:
                 yield
             finally:
                 fcntl.flock(handle, fcntl.LOCK_UN)
+    finally:
+        held.pop()
 
 
 def refresh_guard(name):
@@ -169,14 +192,13 @@ MODE_MODEL = "model"
 MODE_ENDURANCE = "endurance"
 MODES = (MODE_MODEL, MODE_ENDURANCE)
 MODE_TITLES = {
-    MODE_MODEL: "model — keep %s available",
+    MODE_MODEL: "model — keep {model} available",
     MODE_ENDURANCE: "endurance — spend what resets soonest",
 }
 
 
 def mode_title(mode):
-    return MODE_TITLES.get(mode, mode) % PREFERRED_MODEL if "%s" in MODE_TITLES.get(
-        mode, "") else MODE_TITLES.get(mode, mode)
+    return MODE_TITLES.get(mode, mode).format(model=PREFERRED_MODEL)
 
 DEFAULT_STATE = {
     "enabled": False,      # is auto-switching armed?
@@ -223,6 +245,22 @@ def _write_json(path, data, indent=None):
             os.unlink(tmp)
 
 
+def _write_text(path, body):
+    """The same temp-file-then-rename discipline as _write_json, for the log."""
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    handle, tmp = tempfile.mkstemp(dir=os.path.dirname(path),
+                                   prefix=os.path.basename(path) + ".")
+    try:
+        with os.fdopen(handle, "w") as f:
+            f.write(body)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+    finally:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+
+
 def _read_json(path, default):
     try:
         with open(path) as f:
@@ -258,6 +296,15 @@ def save_cache(cache):
     _write_json(CACHE_FILE, dict(cache, version=CACHE_VERSION))
 
 
+@contextlib.contextmanager
+def open_cache():
+    """The cache, loaded and saved under its guard."""
+    with guard("cache"):
+        disk = load_cache()
+        yield disk
+        save_cache(disk)
+
+
 def merge_cache(mine):
     """Fold a finished pass into whatever is on disk now.
 
@@ -268,8 +315,7 @@ def merge_cache(mine):
     A login could be lost the same way — reconnect() drops the stale entry so
     the fresh credentials are picked up, and an in-flight pass put it back.
     """
-    with guard("cache"):
-        disk = load_cache()
+    with open_cache() as disk:
         for name, entry in mine["profiles"].items():
             known = disk["profiles"].get(name)
             if not known or entry["at"] >= known["at"]:
@@ -279,13 +325,12 @@ def merge_cache(mine):
             if not known or entry["at"] >= known["at"]:
                 disk["identity"][name] = entry
         disk["throttled_until"] = max(disk["throttled_until"], mine["throttled_until"])
-        save_cache(disk)
-        return disk
 
 
 HISTORY_FILE = os.path.join(CLAUDINI_HOME, "history.jsonl")
 HISTORY_DAYS = 30
-HISTORY_GAP = 5 * 60      # don't record the same picture twice in a row
+HISTORY_GAP = 5 * 60           # don't record the same picture twice in a row
+HISTORY_MAX_BYTES = 4 << 20    # trim once the log passes this
 
 
 def record(entry):
@@ -299,38 +344,49 @@ def record(entry):
     with guard("history"):
         with open(HISTORY_FILE, "a") as f:
             f.write(json.dumps(entry) + "\n")
-        if os.path.getsize(HISTORY_FILE) > 4 << 20:
+        if os.path.getsize(HISTORY_FILE) > HISTORY_MAX_BYTES:
             trim_history()
 
 
 def trim_history():
+    kept = read_history()
+    _write_text(HISTORY_FILE, "".join(json.dumps(line) + "\n" for line in kept))
+
+
+def read_history():
+    """Every entry still within the window, oldest first."""
     cutoff = dt.datetime.now().timestamp() - HISTORY_DAYS * 86400
-    kept = [line for line in read_history(raw=True) if line.get("at", 0) >= cutoff]
-    with open(HISTORY_FILE, "w") as f:
-        for line in kept:
-            f.write(json.dumps(line) + "\n")
-
-
-def read_history(raw=False):
-    """Every sample still within the window, oldest first."""
     try:
         with open(HISTORY_FILE) as f:
-            lines = [json.loads(line) for line in f if line.strip()]
+            entries = [json.loads(line) for line in f if line.strip()]
     except (OSError, json.JSONDecodeError):
         return []
-    if raw:
-        return lines
-    cutoff = dt.datetime.now().timestamp() - HISTORY_DAYS * 86400
-    return [line for line in lines if line.get("at", 0) >= cutoff]
+    return [e for e in entries if e.get("at", 0) >= cutoff]
+
+
+def last_sample_at():
+    """When we last recorded a picture, from the tail of the log.
+
+    Parsing the whole file to read one timestamp meant every pass — in each
+    long-running process — walked a log we let grow to four megabytes.
+    """
+    try:
+        with open(HISTORY_FILE, "rb") as f:
+            f.seek(max(0, os.path.getsize(HISTORY_FILE) - 8192))
+            tail = f.read().decode("utf8", "replace").splitlines()
+    except OSError:
+        return 0
+    for line in reversed(tail):
+        if '"usage"' in line:
+            with contextlib.suppress(json.JSONDecodeError):
+                return json.loads(line).get("at", 0)
+    return 0
 
 
 def record_usage(rows):
     """Sample what every account looks like, at most every HISTORY_GAP."""
     fresh = [r for r in rows if r["status"] == OK and r["limits"]]
-    if not fresh:
-        return
-    last = next((e for e in reversed(read_history()) if "usage" in e), None)
-    if last and dt.datetime.now().timestamp() - last["at"] < HISTORY_GAP:
+    if not fresh or dt.datetime.now().timestamp() - last_sample_at() < HISTORY_GAP:
         return
     record({"usage": {r["name"]: {l["kind"]: l["percent"] for l in r["limits"]}
                       for r in fresh},
@@ -339,11 +395,9 @@ def record_usage(rows):
 
 def forget(name):
     """Drop what we know about a profile, without clobbering the rest."""
-    with guard("cache"):
-        disk = load_cache()
+    with open_cache() as disk:
         disk["profiles"].pop(name, None)
         disk["identity"].pop(name, None)
-        save_cache(disk)
 
 
 def update_state(**changes):
@@ -1104,90 +1158,74 @@ def switch(name):
     if name not in profiles():
         return False
     with guard("switch"):
-        return _switch_locked(name)
+        current = active_profile()
+        if current == name:
+            return True
 
+        target = keychain_read(profile_service(name))
+        if not target:
+            return False
+        live = keychain_read(LIVE_SERVICE)
+        if current and live:
+            keychain_write(profile_service(current), live)
 
-def _switch_locked(name):
-    current = active_profile()
-    if current == name:
+        if not keychain_write(LIVE_SERVICE, target):
+            return False
+        try:
+            _point_at(name)
+        except (OSError, RuntimeError):
+            if live:                       # put the live slot back as it was
+                keychain_write(LIVE_SERVICE, live)
+            return False
+
+        _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=name), indent=2)
+        _CONFIG_CACHE.clear()
         return True
-
-    target = keychain_read(profile_service(name))
-    if not target:
-        return False
-    live = keychain_read(LIVE_SERVICE)
-    if current and live:
-        keychain_write(profile_service(current), live)
-
-    if not keychain_write(LIVE_SERVICE, target):
-        return False
-    try:
-        _point_at(name)
-    except (OSError, RuntimeError):
-        if live:                       # put the live slot back as it was
-            keychain_write(LIVE_SERVICE, live)
-        return False
-
-    _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=name), indent=2)
-    _CONFIG_CACHE.clear()
-    return True
 
 
 def add_profile(name):
     """Save the credentials in use right now as a new profile."""
     with guard("switch"):
-        return _add_locked(name)
-
-
-def _add_locked(name):
-    if name in profiles():
-        raise ValueError("profile %r already exists" % name)
-    live = keychain_read(LIVE_SERVICE)
-    if not live:
-        raise RuntimeError("no credentials in use to save")
-    keychain_write(profile_service(name), live)
-    _write_json(profile_config(name), _read_json(CLAUDE_JSON, {}), indent=2)
+        if name in profiles():
+            raise ValueError("profile %r already exists" % name)
+        live = keychain_read(LIVE_SERVICE)
+        if not live:
+            raise RuntimeError("no credentials in use to save")
+        keychain_write(profile_service(name), live)
+        _write_json(profile_config(name), _read_json(CLAUDE_JSON, {}), indent=2)
 
 
 def rename_profile(old, new):
     with guard("switch"):
-        return _rename_locked(old, new)
-
-
-def _rename_locked(old, new):
-    if old not in profiles():
-        raise ValueError("no profile named %r" % old)
-    if new in profiles():
-        raise ValueError("profile %r already exists" % new)
-    credentials = keychain_read(profile_service(old))
-    if credentials:
-        keychain_write(profile_service(new), credentials)
-        keychain_delete(profile_service(old))
-    os.rename(os.path.dirname(profile_config(old)), os.path.dirname(profile_config(new)))
-    with contextlib.suppress(OSError):
-        os.unlink(lock_path("refresh-" + old))
-    _CONFIG_CACHE.clear()
-    if active_profile() == old:
-        _point_at(new)
-        _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=new), indent=2)
+        if old not in profiles():
+            raise ValueError("no profile named %r" % old)
+        if new in profiles():
+            raise ValueError("profile %r already exists" % new)
+        credentials = keychain_read(profile_service(old))
+        if credentials:
+            keychain_write(profile_service(new), credentials)
+            keychain_delete(profile_service(old))
+        os.rename(os.path.dirname(profile_config(old)), os.path.dirname(profile_config(new)))
+        with contextlib.suppress(OSError):
+            os.unlink(lock_path("refresh-" + old))
+        _CONFIG_CACHE.clear()
+        if active_profile() == old:
+            _point_at(new)
+            _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=new), indent=2)
 
 
 def remove_profile(name):
     with guard("switch"):
-        return _remove_locked(name)
-
-
-def _remove_locked(name):
-    if name not in profiles():
-        raise ValueError("no profile named %r" % name)
-    if active_profile() == name:
-        raise ValueError("%r is in use — switch away from it first" % name)
-    keychain_delete(profile_service(name))
-    shutil.rmtree(os.path.dirname(profile_config(name)), ignore_errors=True)
-    with contextlib.suppress(OSError):
-        os.unlink(lock_path("refresh-" + name))
-    _CONFIG_CACHE.clear()
-    forget(name)
+        if name not in profiles():
+            raise ValueError("no profile named %r" % name)
+        if active_profile() == name:
+            raise ValueError("%r is in use — switch away from it first" % name)
+        keychain_delete(profile_service(name))
+        shutil.rmtree(os.path.dirname(profile_config(name)), ignore_errors=True)
+        with contextlib.suppress(OSError):
+            os.unlink(lock_path("refresh-" + name))
+        _CONFIG_CACHE.clear()
+        forget(name)
 
 
 def auto_tick(rows=None):
@@ -1417,11 +1455,11 @@ def for_json(rows, state, plan=None):
                 # The app groups on these rather than restating which kinds
                 # are general and which limit is the preferred model.
                 "general": l["kind"] in GENERAL_KINDS,
-                "preferred": l is preferred_limit(r),
+                "preferred": l is preferred,
             } for l in r["limits"]],
         } for r in ranked(rows, state)],
         "auto": state["enabled"],
-        "actions": [{"command": c, "about": a} for c, a in ACTIONS],
+        "actions": actions_json(),
         "fleet": fleet_line(fleet(rows, state)),
         "mode": state["mode"],
         "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
@@ -1429,16 +1467,14 @@ def for_json(rows, state, plan=None):
         "show_saturated": state["mode"] == MODE_MODEL,
         "throttled_for": pause,
         "throttle_notice": throttle_notice(pause) if pause else None,
-        # The app polls on these rather than hardcoding a copy of the TTLs.
+        # The app polls on this rather than hardcoding a copy of the period.
         "poll_after_sec": POLL_SEC,
-        "stale_after_sec": SUCCESS_TTL,
         "next": {"name": target["name"] if target else None,
                  "reason": why, "blocked_by": blocked,
-                 "staying": staying(rows, (target, why, blocked)),
+                 "staying": put_off,
                  # Where you would go if this account ran out, so the line is
                  # worth reading even when nothing is about to change.
-                 "after": (runner_up(rows, state) or {}).get("name")
-                          if staying(rows, (target, why, blocked)) else None},
+                 "after": (runner_up(rows, state) or {}).get("name") if put_off else None},
     }
 
 
@@ -1456,102 +1492,12 @@ ACTIONS = [
     ("--mode model|endurance", "which goal the policy optimises for"),
     ("--tick", "run one auto-switch decision now"),
     ("--history", "write and open the usage history page"),
+    ("--actions", "this list, as JSON"),
 ]
 
-HISTORY_COLOURS = ["#4f9cf9", "#f2a541", "#4cc38a", "#e5534b", "#a371f7", "#3fb0b0"]
 
-
-def history_chart(samples, kind, accounts, colours, width=880, height=190):
-    """One SVG line chart: a account per line, time across, percent up."""
-    span = (samples[0]["at"], samples[-1]["at"])
-    reach = max(1, span[1] - span[0])
-    x = lambda at: 46 + (at - span[0]) / reach * (width - 60)
-    y = lambda pct: 12 + (100 - pct) / 100 * (height - 40)
-
-    parts = ['<svg viewBox="0 0 %d %d" role="img">' % (width, height)]
-    for pct in (0, 50, 100):
-        parts.append('<line class="grid" x1="46" x2="%d" y1="%.1f" y2="%.1f"/>'
-                     % (width - 14, y(pct), y(pct)))
-        parts.append('<text class="tick" x="38" y="%.1f">%d%%</text>' % (y(pct) + 4, pct))
-
-    for name in accounts:
-        points = [(x(s["at"]), y(s["usage"][name][kind]))
-                  for s in samples if name in s["usage"] and kind in s["usage"][name]]
-        if len(points) > 1:
-            parts.append('<polyline stroke="%s" points="%s"/>'
-                         % (colours[name],
-                            " ".join("%.1f,%.1f" % p for p in points)))
-    parts.append("</svg>")
-    return "".join(parts)
-
-
-def write_history(path=None):
-    """A self-contained page: how full each account has been, and when the
-    policy moved between them."""
-    entries = read_history()
-    samples = [e for e in entries if "usage" in e]
-    path = path or os.path.join(CLAUDINI_HOME, "history.html")
-    if len(samples) < 2:
-        _write_page(path, "<p class='empty'>Not enough history yet — samples are "
-                          "taken as the tool reads your accounts. Come back later.</p>")
-        return path
-
-    accounts = sorted({name for s in samples for name in s["usage"]})
-    colours = {n: HISTORY_COLOURS[i % len(HISTORY_COLOURS)] for i, n in enumerate(accounts)}
-    switches = [e for e in entries if "switch" in e][-12:]
-
-    legend = "".join('<span><i style="background:%s"></i>%s</span>' % (colours[n], n)
-                     for n in accounts)
-    moves = "".join(
-        "<tr><td>%s</td><td>%s → <b>%s</b></td><td>%s</td></tr>"
-        % (dt.datetime.fromtimestamp(e["at"]).strftime("%d %b %H:%M"),
-           e["switch"]["from"], e["switch"]["to"], e["switch"].get("why", ""))
-        for e in reversed(switches))
-
-    body = """
-      <p class="meta">%d samples over %s · %d accounts</p>
-      <div class="legend">%s</div>
-      <h2>Five-hour window</h2>%s
-      <h2>Weekly window</h2>%s
-      <h2>Switches</h2>%s
-    """ % (len(samples),
-           until(samples[-1]["at"] - samples[0]["at"]) or "a moment",
-           len(accounts), legend,
-           history_chart(samples, "session", accounts, colours),
-           history_chart(samples, "weekly_all", accounts, colours),
-           "<table>%s</table>" % moves if moves else "<p class='empty'>None yet.</p>")
-    _write_page(path, body)
-    return path
-
-
-def _write_page(path, body):
-    page = """<!doctype html><meta charset="utf-8"><title>claudini-pilot history</title>
-<style>
- :root { color-scheme: light dark; --ink:#1a1a1a; --dim:#6b6b6b; --line:#d8d8d8; --bg:#fbfbfa }
- @media (prefers-color-scheme: dark) {
-   :root { --ink:#e8e8e6; --dim:#9a9a97; --line:#333; --bg:#151514 } }
- body { margin:0; padding:32px; background:var(--bg); color:var(--ink);
-        font:14px/1.5 -apple-system, system-ui, sans-serif; max-width:940px }
- h1 { font-size:19px; margin:0 0 4px } h2 { font-size:13px; font-weight:600;
-      text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:28px 0 8px }
- .meta, .empty { color:var(--dim) } .empty { padding:24px 0 }
- .legend { display:flex; flex-wrap:wrap; gap:14px; margin:14px 0 }
- .legend span { display:flex; align-items:center; gap:6px; font-size:12px }
- .legend i { width:11px; height:3px; border-radius:2px }
- svg { width:100%%; height:auto; overflow:visible }
- polyline { fill:none; stroke-width:1.8; stroke-linejoin:round; stroke-linecap:round }
- .grid { stroke:var(--line); stroke-width:1 }
- .tick { fill:var(--dim); font-size:10px; text-anchor:end }
- table { border-collapse:collapse; font-size:13px; width:100%% }
- td { padding:6px 10px 6px 0; border-bottom:1px solid var(--line); vertical-align:top }
- td:first-child { color:var(--dim); white-space:nowrap }
-</style>
-<h1>claudini-pilot</h1>%s
-""" % body
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as f:
-        f.write(page)
-
+def actions_json():
+    return [{"command": command, "about": about} for command, about in ACTIONS]
 
 def main():
     args = sys.argv[1:]
@@ -1565,13 +1511,20 @@ def main():
         return
 
     if command == "--history":
-        path = write_history()
+        # Loaded by path: the entry point is a symlink, so the script's
+        # directory is not where its siblings live.
+        beside = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                              "claudini_history.py")
+        spec = importlib.util.spec_from_file_location("claudini_history", beside)
+        page = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(page)
+        path = page.write()
         print(path)
         subprocess.run(["/usr/bin/open", path])
         return
 
     if command == "--actions":
-        json.dump([{"command": c, "about": a} for c, a in ACTIONS], sys.stdout)
+        json.dump(actions_json(), sys.stdout)
         return
 
     if command in ("--add", "--rename", "--remove"):

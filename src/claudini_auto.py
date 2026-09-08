@@ -203,7 +203,7 @@ class Console:
         self.put(scr, y, COL["plan"], self.clip(cu.plan_label(p), WIDTH["plan"]), curses.A_DIM)
 
         if p["status"] != cu.OK:
-            note = (p.get("detail") or p["status"]) + (" (cached)" if p.get("cached") else "")
+            note = cu.status_text(p) + (" (cached)" if p.get("cached") else "")
             self.put(scr, y, COL["session"], note, curses.color_pair(3))
             return
 

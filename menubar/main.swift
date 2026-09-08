@@ -31,7 +31,7 @@ struct Profile: Decodable {
     let email: String?
     let active: Bool
     let status: String
-    let detail: String?
+    let detail: String
     let limits: [Limit]
     let limit_reset: Bool?
     let needs_login: Bool
@@ -85,7 +85,6 @@ struct Snapshot: Decodable {
     let show_saturated: Bool
     let throttle_notice: String?
     let poll_after_sec: Int
-    let stale_after_sec: Int
     let next: NextUp
 }
 
@@ -133,11 +132,6 @@ func pad(_ s: String, _ width: Int) -> String {
                      : s + String(repeating: " ", count: width - s.count)
 }
 
-func padLeft(_ s: String, _ width: Int) -> String {
-    s.count >= width ? String(s.prefix(width))
-                     : String(repeating: " ", count: width - s.count) + s
-}
-
 func digits(_ s: String, _ size: CGFloat, _ color: NSColor) -> NSAttributedString {
     styled(s, .monospacedDigitSystemFont(ofSize: size, weight: .regular), color)
 }
@@ -161,7 +155,8 @@ func countdown(to epoch: Int?) -> String {
 
 /// A ring filled to `percent`, for the menu bar. Reads at a glance at a size
 /// where three of them would be unreadable.
-func gauge(_ percent: Int, _ shade: NSColor, size: CGFloat = 13) -> NSImage {
+func gauge(_ percent: Int, _ shade: NSColor) -> NSImage {
+    let size: CGFloat = 13
     let image = NSImage(size: NSSize(width: size, height: size), flipped: false) { rect in
         let width: CGFloat = 2.5
         let inset = rect.insetBy(dx: width / 2, dy: width / 2)
@@ -191,8 +186,8 @@ func gauge(_ percent: Int, _ shade: NSColor, size: CGFloat = 13) -> NSImage {
 
 /// Every call into the engine goes through here, so the interpreter and the
 /// helper path are spelled once.
-func engine(_ args: [String]) -> Data {
-    run("/usr/bin/env", ["python3", helper] + args).1
+func engine(_ args: [String]) -> (Int32, Data) {
+    run("/usr/bin/env", ["python3", helper] + args)
 }
 
 /// One engine process at a time, for the whole app.
@@ -239,7 +234,7 @@ final class Bar: NSObject, NSMenuDelegate {
         guard !busy else { return }
         busy = true
         engineQueue.async {
-            let data = engine(args)
+            let (_, data) = engine(args)
             DispatchQueue.main.async {
                 self.busy = false
                 self.apply(data)
@@ -435,7 +430,9 @@ final class Bar: NSObject, NSMenuDelegate {
         out.append(mono(who + "\n", 11, .regular, .secondaryLabelColor))
 
         guard !p.limits.isEmpty else {
-            var hint = p.detail ?? p.status
+            // The engine always fills `detail`, humanised, so there is
+            // nothing to fall back to.
+            var hint = p.detail
             if p.needs_login { hint += " — click to log in" }
             out.append(mono("   " + hint, 11, .regular, .systemRed))
             return out
@@ -515,7 +512,7 @@ final class Bar: NSObject, NSMenuDelegate {
     @objc func switchTo(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         inBackground {
-            let code = run("/usr/bin/env", ["python3", helper, "--switch", name]).0
+            let code = engine(["--switch", name]).0
             DispatchQueue.main.async {
                 let alert = NSAlert()
                 if code == 0 {
