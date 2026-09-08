@@ -21,30 +21,62 @@ _spec.loader.exec_module(cu)
 HISTORY_COLOURS = ["#4f9cf9", "#f2a541", "#4cc38a", "#e5534b", "#a371f7", "#3fb0b0"]
 
 
-WIDTH, HEIGHT = 880, 190
+WIDTH, HEIGHT = 880, 210
+LEFT, RIGHT, TOP, BOTTOM = 46, 96, 12, 30    # margins; RIGHT holds the end labels
+
+
+def clock(at, span):
+    """A time label: the date only matters once the window crosses a day."""
+    moment = dt.datetime.fromtimestamp(at)
+    return moment.strftime("%H:%M" if span < 86400 else "%d/%m %H:%M")
 
 
 def chart(samples, kind, colours):
     """One SVG line chart: an account per line, time across, percent up."""
-    width, height = WIDTH, HEIGHT
-    span = (samples[0]["at"], samples[-1]["at"])
-    reach = max(1, span[1] - span[0])
-    x = lambda at: 46 + (at - span[0]) / reach * (width - 60)
-    y = lambda pct: 12 + (100 - pct) / 100 * (height - 40)
+    first, last = samples[0]["at"], samples[-1]["at"]
+    reach = max(1, last - first)
+    plot = WIDTH - LEFT - RIGHT
+    x = lambda at: LEFT + (at - first) / reach * plot
+    y = lambda pct: TOP + (100 - pct) / 100 * (HEIGHT - TOP - BOTTOM)
 
-    parts = ['<svg viewBox="0 0 %d %d" role="img">' % (width, height)]
+    parts = ['<svg viewBox="0 0 %d %d" role="img">' % (WIDTH, HEIGHT)]
     for pct in (0, 50, 100):
-        parts.append('<line class="grid" x1="46" x2="%d" y1="%.1f" y2="%.1f"/>'
-                     % (width - 14, y(pct), y(pct)))
-        parts.append('<text class="tick" x="38" y="%.1f">%d%%</text>' % (y(pct) + 4, pct))
+        parts.append('<line class="grid" x1="%d" x2="%.1f" y1="%.1f" y2="%.1f"/>'
+                     % (LEFT, LEFT + plot, y(pct), y(pct)))
+        parts.append('<text class="tick" x="%d" y="%.1f">%d%%</text>'
+                     % (LEFT - 8, y(pct) + 4, pct))
 
-    for name in colours:
+    # When it happened. Without this the chart says how full each account got
+    # but never when, which is most of what a history is for.
+    for at in (first, first + reach // 2, last):
+        parts.append('<text class="time" x="%.1f" y="%d">%s</text>'
+                     % (x(at), HEIGHT - 10, clock(at, reach)))
+
+    ends = []
+    for name, shade in colours.items():
         points = [(x(s["at"]), y(s["usage"][name][kind]))
-                  for s in samples if name in s["usage"] and kind in s["usage"][name]]
+                  for s in samples if kind in s["usage"].get(name, {})]
+        if not points:
+            continue
         if len(points) > 1:
             parts.append('<polyline stroke="%s" points="%s"/>'
-                         % (colours[name],
-                            " ".join("%.1f,%.1f" % p for p in points)))
+                         % (shade, " ".join("%.1f,%.1f" % p for p in points)))
+        # A dot per sample, so a account with one or two readings is visible
+        # at all rather than being an invisible zero-length line.
+        if len(points) <= 12:
+            parts += ['<circle cx="%.1f" cy="%.1f" r="2.4" fill="%s"/>' % (px, py, shade)
+                      for px, py in points]
+        ends.append([points[-1][1], name, shade])
+
+    # Name each line where it ends, nudged apart so labels never sit on top of
+    # one another — five accounts at 100% would otherwise overprint.
+    ends.sort()
+    for i in range(1, len(ends)):
+        ends[i][0] = max(ends[i][0], ends[i - 1][0] + 12)
+    for at_y, name, shade in ends:
+        parts.append('<text class="end" x="%.1f" y="%.1f" fill="%s">%s</text>'
+                     % (LEFT + plot + 8, at_y + 4, shade, name))
+
     parts.append("</svg>")
     return "".join(parts)
 
@@ -65,8 +97,6 @@ def write(path=None):
                for i, name in enumerate(accounts)}
     switches = [e for e in entries if "switch" in e][-12:]
 
-    legend = "".join('<span><i style="background:%s"></i>%s</span>' % (shade, name)
-                     for name, shade in colours.items())
     moves = "".join(
         "<tr><td>%s</td><td>%s → <b>%s</b></td><td>%s</td></tr>"
         % (dt.datetime.fromtimestamp(e["at"]).strftime("%d %b %H:%M"),
@@ -75,13 +105,12 @@ def write(path=None):
 
     body = """
       <p class="meta">%d samples over %s · %d accounts</p>
-      <div class="legend">%s</div>
       <h2>Five-hour window</h2>%s
       <h2>Weekly window</h2>%s
       <h2>Switches</h2>%s
     """ % (len(samples),
-           cu.until(samples[-1]["at"] - samples[0]["at"]) or "a moment",
-           len(colours), legend,
+           cu.until(samples[-1]["at"] - samples[0]["at"]),
+           len(colours),
            chart(samples, "session", colours),
            chart(samples, "weekly_all", colours),
            "<table>%s</table>" % moves if moves else "<p class='empty'>None yet.</p>")
@@ -99,13 +128,13 @@ PAGE_HEAD = """<!doctype html><meta charset="utf-8"><title>claudini-pilot histor
  h1 { font-size:19px; margin:0 0 4px } h2 { font-size:13px; font-weight:600;
       text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:28px 0 8px }
  .meta, .empty { color:var(--dim) } .empty { padding:24px 0 }
- .legend { display:flex; flex-wrap:wrap; gap:14px; margin:14px 0 }
- .legend span { display:flex; align-items:center; gap:6px; font-size:12px }
- .legend i { width:11px; height:3px; border-radius:2px }
  svg { width:100%; height:auto; overflow:visible }
  polyline { fill:none; stroke-width:1.8; stroke-linejoin:round; stroke-linecap:round }
  .grid { stroke:var(--line); stroke-width:1 }
  .tick { fill:var(--dim); font-size:10px; text-anchor:end }
+ .time { fill:var(--dim); font-size:10px; text-anchor:middle }
+ .end  { font-size:11px; font-weight:500 }
+ circle { opacity:.9 }
  table { border-collapse:collapse; font-size:13px; width:100% }
  td { padding:6px 10px 6px 0; border-bottom:1px solid var(--line); vertical-align:top }
  td:first-child { color:var(--dim); white-space:nowrap }
