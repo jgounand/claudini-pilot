@@ -185,9 +185,9 @@ cd claudini-pilot
 Everything is symlinked back to the clone, so `git pull` is enough to update
 the commands. Re-run `./install.sh` to rebuild the menu bar app.
 
-The app icon is drawn in `menubar/icon.html` and committed as `.icns`, so
-installing needs no browser; `menubar/build-icon.sh` regenerates it if you
-change the artwork.
+The app icon is drawn by `menubar/make-icon.py` and committed as `.icns`, so
+installing needs nothing beyond a shell. Re-run that script if you change the
+artwork (it needs Pillow).
 
 ## Usage
 

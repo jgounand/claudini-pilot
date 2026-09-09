@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# The icon is committed rather than rendered here: menubar/icon.html is its
-# source, and menubar/build-icon.sh regenerates it when the design changes.
+# The icon is committed rather than drawn here: menubar/make-icon.py is its
+# source, and regenerates it when the design changes.
 # Installe claudini-console : les deux commandes shell et l'app menu bar.
 # Tout est posé en lien symbolique vers ce dépôt — un `git pull` suffit ensuite.
 set -euo pipefail
