@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# The icon is committed rather than rendered here: menubar/icon.html is its
+# source, and menubar/build-icon.sh regenerates it when the design changes.
 # Installe claudini-console : les deux commandes shell et l'app menu bar.
 # Tout est posé en lien symbolique vers ce dépôt — un `git pull` suffit ensuite.
 set -euo pipefail
@@ -28,6 +30,9 @@ if command -v swiftc >/dev/null; then
   mkdir -p "$APP/Contents/MacOS"
   cp "$BUILD/ClaudiniBar" "$APP/Contents/MacOS/ClaudiniBar"
   cp "$REPO/menubar/Info.plist" "$APP/Contents/Info.plist"
+  mkdir -p "$APP/Contents/Resources"
+  cp "$REPO/menubar/ClaudiniBar.icns" "$APP/Contents/Resources/"
+  touch "$APP"                     # nudge Finder to re-read the icon
   codesign --force --sign - "$APP" >/dev/null 2>&1 || true
   echo "menu bar   -> $APP"
   open "$APP"

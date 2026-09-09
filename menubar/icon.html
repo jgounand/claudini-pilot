@@ -1,0 +1,40 @@
+<!doctype html><meta charset="utf-8">
+<!--
+  The app icon, drawn rather than shipped as a binary so it stays editable and
+  reviewable. install.sh renders this at 1024 with headless Chrome and builds
+  the .icns from it.
+
+  It reuses the one thing the app already looks like: the ring in the menu bar
+  that fills with usage. Anything more detailed turns to mush at 16 pixels.
+-->
+<style>
+  html, body { margin: 0; width: 1024px; height: 1024px; background: none }
+  /* Apple's grid: the artwork sits inset in the canvas, not edge to edge. */
+  .tile {
+    position: absolute; inset: 100px;
+    border-radius: 185px;
+    background: linear-gradient(160deg, #2b3140 0%, #171a22 55%, #0f1116 100%);
+    box-shadow: inset 0 3px 0 rgba(255,255,255,.10), inset 0 -3px 0 rgba(0,0,0,.35);
+    display: grid; place-items: center;
+  }
+  svg { width: 520px; height: 520px; transform: rotate(-90deg) }
+  .track { fill: none; stroke: rgba(255,255,255,.14); stroke-width: 86 }
+  .fill  { fill: none; stroke: url(#sweep); stroke-width: 86; stroke-linecap: round }
+</style>
+<div class="tile">
+  <svg viewBox="0 0 400 400">
+    <defs>
+      <!-- Cool where the arc starts, warm where it ends: the ring reads as
+           filling up and heating up, the way the menu bar one does. -->
+      <linearGradient id="sweep" x1="1" y1="1" x2="0" y2="0">
+        <stop offset="0%" stop-color="#5ad19a"/>
+        <stop offset="55%" stop-color="#f2c14e"/>
+        <stop offset="100%" stop-color="#f08a4b"/>
+      </linearGradient>
+    </defs>
+    <circle class="track" cx="200" cy="200" r="150"/>
+    <!-- ~68% of the way round: a gauge in use, not empty and not spent. -->
+    <circle class="fill" cx="200" cy="200" r="150"
+            stroke-dasharray="641 942" pathLength="942"/>
+  </svg>
+</div>
