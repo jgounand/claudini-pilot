@@ -185,6 +185,15 @@ cd claudini-pilot
 Everything is symlinked back to the clone, so `git pull` is enough to update
 the commands. Re-run `./install.sh` to rebuild the menu bar app.
 
+It does not start by itself after a restart unless you ask it to:
+
+```sh
+./install.sh --at-login        # and --not-at-login to undo
+```
+
+That registers an ordinary login item, removable from System Settings >
+General > Login Items like anything else.
+
 The app icon is drawn by `menubar/make-icon.py` and committed as `.icns`, so
 installing needs nothing beyond a shell. Re-run that script if you change the
 artwork (it needs Pillow).

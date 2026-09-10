@@ -6,6 +6,20 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+APP_PATH="$HOME/Applications/ClaudiniBar.app"
+
+# A menu bar app that does not come back after a restart is a menu bar app you
+# stop trusting. Opt-in, and removable from System Settings > General >
+# Login Items like anything else.
+if [ "${1:-}" = "--at-login" ]; then
+  osascript -e "tell application \"System Events\" to make login item at end \
+                with properties {path:\"$APP_PATH\", hidden:true}" >/dev/null
+  echo "will start at login"
+elif [ "${1:-}" = "--not-at-login" ]; then
+  osascript -e 'tell application "System Events" to delete login item "ClaudiniBar"' \
+    2>/dev/null || true
+  echo "will no longer start at login"
+fi
 TOOLS="$HOME/.claudini/tools"
 BIN="$HOME/.local/bin"
 APP="$HOME/Applications/ClaudiniBar.app"
@@ -38,6 +52,11 @@ if command -v swiftc >/dev/null; then
   open "$APP"
 else
   echo "swiftc absent (Xcode Command Line Tools) — app menu bar non construite"
+fi
+
+if ! osascript -e 'tell application "System Events" to get the name of every login item' \
+     2>/dev/null | grep -q ClaudiniBar; then
+  echo "to start it at login:  ./install.sh --at-login"
 fi
 
 case ":$PATH:" in
