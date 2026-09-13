@@ -12,6 +12,11 @@ final class Bar: NSObject, NSMenuDelegate {
 
     override init() {
         super.init()
+        // Start on the right, near the clock. On a notched laptop macOS hides
+        // whatever does not fit left of the notch, newest items first, so the
+        // default spot is the first to disappear. Registered as a default, so
+        // if you Cmd-drag the item somewhere else, that position wins.
+        UserDefaults.standard.register(defaults: ["NSStatusItem Preferred Position ClaudiniBar": 260])
         item.autosaveName = "ClaudiniBar"
         item.button?.title = "◌"
         let menu = NSMenu()
@@ -75,27 +80,24 @@ final class Bar: NSObject, NSMenuDelegate {
         item.button?.image = active.binding.map { gauge($0.percent, shade) }
         item.button?.imagePosition = .imageLeading
 
-        // Name the window that is actually closest, because which one binds
-        // changes through the day: the 5-hour early on, the weekly by Friday.
+        // Only the window that binds and how full it is. On a notched laptop the
+        // menu bar is half as wide and macOS silently hides whatever does not
+        // fit — newest items first — so the account name, which the menu shows
+        // anyway, cost the whole item its place. It was the widest one there.
         //
-        // The figure is what has been *used*, like every row below and like
-        // the ring beside it. Reporting what was left here while the rows
-        // reported what was spent put two different numbers on one limit.
-        let title = NSMutableAttributedString(attributedString:
-            text(" " + active.name + " ", 12, .medium))
+        // The figure is what has been *used*, like every row in the menu and
+        // like the ring beside it.
+        let title = NSMutableAttributedString()
         if let binding = active.binding {
-            title.append(digits("\(binding.label) \(binding.percent)%", 12, shade))
+            title.append(digits(" \(binding.label) \(binding.percent)%", 12, shade))
         } else {
-            title.append(text("?", 12))
+            title.append(text(" ?", 12))
         }
         // The spent-model marker only means something while the policy is
         // protecting that model; in endurance mode it is just noise.
         if snap.show_saturated, !active.saturated.isEmpty {
             title.append(text(" " + active.saturated.map { String($0.prefix(1)) }.joined(),
                               11, .bold, .systemRed))
-        }
-        if snap.auto {
-            title.append(text(" ⟳", 11, .bold, .controlAccentColor))
         }
         item.button?.attributedTitle = title
     }
