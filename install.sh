@@ -6,7 +6,8 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_PATH="$HOME/Applications/ClaudiniBar.app"
+APP_PATH="/Applications/ClaudiniBar.app"
+[ -w /Applications ] || APP_PATH="$HOME/Applications/ClaudiniBar.app"
 
 # A menu bar app that does not come back after a restart is a menu bar app you
 # stop trusting. Opt-in, and removable from System Settings > General >
@@ -22,7 +23,10 @@ elif [ "${1:-}" = "--not-at-login" ]; then
 fi
 TOOLS="$HOME/.claudini/tools"
 BIN="$HOME/.local/bin"
-APP="$HOME/Applications/ClaudiniBar.app"
+# /Applications, because that is the folder Finder's sidebar calls
+# "Applications"; ~/Applications is a different one you have to navigate to.
+APP="/Applications/ClaudiniBar.app"
+[ -w /Applications ] || APP="$HOME/Applications/ClaudiniBar.app"
 
 # claudini is no longer required — this manages profiles, switching and logins
 # on its own — but if you already use it, the two read the same layout.
