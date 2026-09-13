@@ -279,11 +279,17 @@ class Contract(unittest.TestCase):
                     "limit_reset", "needs_login", "space", "plan_label",
                     "binding", "saturated"):
             self.assertIn(key, snap["profiles"][0], key)
-        for key in ("short_label", "percent", "level", "resets_at_epoch",
+        for key in ("short_label", "title", "percent", "level", "resets_at_epoch",
                     "general", "preferred"):
             self.assertIn(key, snap["profiles"][0]["limits"][0], key)
         for key in ("name", "reason", "blocked_by", "staying", "after"):
             self.assertIn(key, snap["next"], key)
+
+    def test_limit_titles_read_like_claudes_menu(self):
+        row = next(p for p in self.snapshot()["profiles"] if p["limits"])
+        self.assertEqual([l["title"] for l in row["limits"]],
+                         ["5-hour limit", "Weekly · all models",
+                          "Weekly · " + cu.PREFERRED_MODEL])
 
     def test_detail_is_never_null(self):
         """The app prints it without a fallback."""

@@ -1403,6 +1403,12 @@ def render(rows, plan=None):
 
 
 SHORT_LABELS = {"session": "5h", "weekly_all": "7d"}
+# Worded the way Claude's own menu words them, so the two read the same.
+LIMIT_TITLES = {"session": "5-hour limit", "weekly_all": "Weekly · all models"}
+
+
+def limit_title(limit):
+    return LIMIT_TITLES.get(limit["kind"]) or "Weekly · %s" % limit["label"]
 
 
 def binding_limit(p):
@@ -1451,6 +1457,7 @@ def for_json(rows, state, plan=None):
                 "kind": l["kind"],
                 "label": l["label"],
                 "short_label": SHORT_LABELS.get(l["kind"], l["label"]),
+                "title": limit_title(l),
                 "percent": l["percent"],
                 "level": level(l["percent"]),
                 "resets_at_epoch": epoch_of(l["resets_at"]),
