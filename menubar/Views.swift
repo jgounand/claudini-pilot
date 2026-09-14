@@ -21,32 +21,6 @@ func barColor(_ level: String) -> NSColor {
     }
 }
 
-/// "88% · resets 1h 41m", or just "88%" when there is no reset to speak of.
-func usage(_ percent: Int, resets epoch: Int?, label: String? = nil) -> String {
-    let head = [label, "\(percent)%"].compactMap { $0 }.joined(separator: " ")
-    let tail = resetsIn(epoch)
-    return tail.isEmpty ? head : head + " · " + tail
-}
-
-/// "resets 58m", "resets 4h 20m", "resets 5d" — Claude's wording.
-func resetsIn(_ epoch: Int?) -> String {
-    guard let epoch else { return "" }
-    let mins = max(0, epoch - Int(Date().timeIntervalSince1970)) / 60
-    if mins <= 0 { return "resets now" }
-    if mins < 60 { return "resets \(mins)m" }
-    if mins < 1440 {
-        return mins % 60 == 0 ? "resets \(mins / 60)h" : "resets \(mins / 60)h \(mins % 60)m"
-    }
-    return "resets \(mins / 1440)d"
-}
-
-func updatedAgo(_ date: Date) -> String {
-    let seconds = Int(Date().timeIntervalSince(date))
-    if seconds < 60 { return "Updated just now" }
-    if seconds < 3600 { return "Updated \(seconds / 60)m ago" }
-    return "Updated \(seconds / 3600)h ago"
-}
-
 /// Shared drawing for every row: top-down layout, text, bars, pills, and — when
 /// the row is clickable — a native-looking highlight.
 class MenuRow: NSView {
@@ -270,9 +244,7 @@ final class AccountTitleView: MenuRow {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ dirtyRect: NSRect) {
-        let plan = profile.disabled ? "switched off"
-            : [profile.space, profile.plan_label].compactMap { $0 }
-                .filter { !$0.isEmpty }.joined(separator: " · ")
+        let plan = profile.disabled ? "switched off" : planLine(profile)
         let planStart = right(plan, .systemFont(ofSize: 12),
                               profile.disabled ? .systemOrange : .secondaryLabelColor,
                               y: 5, end: lineEnd)
@@ -361,8 +333,7 @@ final class AccountRowView: MenuRow {
         let nameWidth = min(name.size().width, valueStart - inset - 8)
         left(profile.name, .systemFont(ofSize: 13, weight: .medium), nameColour, y: 5,
              width: nameWidth)
-        let plan = [profile.space, profile.plan_label].compactMap { $0 }
-            .filter { !$0.isEmpty }.joined(separator: " · ")
+        let plan = planLine(profile)
         let planX = inset + nameWidth + 8
         if !plan.isEmpty, valueStart - planX > 30 {
             string(plan, .systemFont(ofSize: 11), .tertiaryLabelColor)

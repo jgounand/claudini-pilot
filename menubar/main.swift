@@ -2,6 +2,8 @@
 // one-click switching between them.
 
 import AppKit
+import SwiftUI
+import WidgetKit
 
 final class Bar: NSObject, NSMenuDelegate {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -25,6 +27,7 @@ final class Bar: NSObject, NSMenuDelegate {
         item.menu = menu
         reload()
         schedule(defaultPoll)
+        watchRequests()
     }
 
     /// The engine owns the cadence; re-arm whenever it says something else.
@@ -60,6 +63,7 @@ final class Bar: NSObject, NSMenuDelegate {
         }
         snapshot = snap
         loadedAt = Date()
+        publish(data, snap)
         let wanted = TimeInterval(snap.poll_after_sec)
         if timer?.timeInterval != wanted { schedule(wanted) }
         paint()
@@ -281,6 +285,64 @@ final class Bar: NSObject, NSMenuDelegate {
         }
     }
 
+    // MARK: widget
+
+    private var widgetFingerprint = ""
+    private var widgetReloadedAt = Date.distantPast
+    private var requestWatch: DispatchSourceFileSystemObject?
+
+    /// Leave the snapshot for the widget, and have it redrawn when that shows.
+    ///
+    /// WidgetKit rations the reloads of an app that is never in front, and
+    /// spending one every five-minute poll would see them refused by the
+    /// afternoon. So the widget is reloaded when something it draws has
+    /// visibly moved — an account, a switch, a status, or a bar by 3 points —
+    /// and at least every half hour. Its own entries keep the countdowns
+    /// moving in between.
+    func publish(_ data: Data, _ snap: Snapshot) {
+        guard SharedStore.folder != nil else { return }
+        SharedStore.write(data)
+        let fingerprint = snap.profiles.map {
+            "\($0.name) \($0.active) \($0.disabled) \($0.status) \(($0.binding?.percent ?? -3) / 3)"
+        }.joined(separator: ",") + "|\(snap.next.name ?? "")|\(snap.auto)|\(snap.mode)"
+        guard fingerprint != widgetFingerprint
+                || Date().timeIntervalSince(widgetReloadedAt) > 30 * 60 else { return }
+        widgetFingerprint = fingerprint
+        widgetReloadedAt = Date()
+        WidgetCenter.shared.reloadAllTimelines()
+    }
+
+    /// Carry out what the widget's buttons ask for. The folder is watched
+    /// rather than polled, and read once at launch for anything asked while
+    /// the app was not running.
+    func watchRequests() {
+        guard let folder = SharedStore.requestsFolder else { return }
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let descriptor = open(folder.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor, eventMask: .write, queue: .main)
+        source.setEventHandler { [weak self] in self?.handleRequests() }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+        requestWatch = source
+        handleRequests()
+    }
+
+    func handleRequests() {
+        for request in Request.drain() {
+            switch request.kind {
+            case .refresh:
+                reload(force: true)
+            case .on, .off:
+                // The engine refuses a name it does not know; a leading dash
+                // would be read as one of its options instead.
+                guard let name = request.name, !name.isEmpty, !name.hasPrefix("-") else { continue }
+                setInRotation(name, request.kind == .on)
+            }
+        }
+    }
+
     @objc func setMode(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         // The engine answers a setting change with the new snapshot, so one
@@ -312,9 +374,56 @@ final class Bar: NSObject, NSMenuDelegate {
 /// than doing nothing visible.
 final class Delegate: NSObject, NSApplicationDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        bar.item.button?.performClick(nil)
+        // After the activation that brought us here has settled: opened in
+        // the same turn, the menu is dismissed again as the app comes forward.
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
+            bar.item.button?.performClick(nil)
+        }
         return false
     }
+}
+
+/// `ClaudiniBar --widget-previews DIR [SNAPSHOT.json]`: draw the widget at
+/// every size, light and dark, and exit. From the engine's current answer, or
+/// from a saved one — which is how the README's picture shows made-up
+/// accounts rather than yours. Layouts can be checked without placing a widget.
+func renderWidgetPreviews(into folder: URL, from file: URL?) {
+    let data = file.flatMap { try? Data(contentsOf: $0) } ?? engine(["--json"]).1
+    guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else {
+        FileHandle.standardError.write("the engine gave no snapshot\n".data(using: .utf8)!)
+        exit(1)
+    }
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let board = Board(snapshot: snapshot, writtenAt: Date(), now: Date(), followed: nil, showOff: true)
+    MainActor.assumeIsolated {
+        for size in WidgetSize.allCases {
+            for scheme in [ColorScheme.light, .dark] {
+                let card = WidgetContent(board: board, size: size)
+                    .padding(16)
+                    .frame(width: size.points.width, height: size.points.height)
+                    .background(scheme == .dark ? Color(white: 0.16) : Color(white: 0.97))
+                    .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+                    .environment(\.colorScheme, scheme)
+                let renderer = ImageRenderer(content: card)
+                renderer.scale = 2
+                guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                      let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+                else { continue }
+                let name = "\(size)-\(scheme == .dark ? "dark" : "light").png"
+                try? png.write(to: folder.appendingPathComponent(name))
+                print(folder.appendingPathComponent(name).path)
+            }
+        }
+    }
+    exit(0)
+}
+
+if let flag = CommandLine.arguments.firstIndex(of: "--widget-previews"),
+   flag + 1 < CommandLine.arguments.count {
+    let arguments = CommandLine.arguments
+    renderWidgetPreviews(into: URL(fileURLWithPath: arguments[flag + 1]),
+                         from: flag + 2 < arguments.count
+                             ? URL(fileURLWithPath: arguments[flag + 2]) : nil)
 }
 
 let app = NSApplication.shared

@@ -1,0 +1,332 @@
+{
+ "profiles": [
+  {
+   "name": "work",
+   "email": "work@example.com",
+   "active": true,
+   "disabled": false,
+   "status": "ok",
+   "detail": "ok",
+   "source": "api",
+   "space": "personal",
+   "plan_label": "max 20x",
+   "limit_reset": true,
+   "needs_login": false,
+   "binding": {
+    "label": "7d",
+    "percent": 79,
+    "headroom": 21,
+    "level": "warning",
+    "resets_at_epoch": 1789884000
+   },
+   "saturated": [],
+   "limits": [
+    {
+     "kind": "session",
+     "label": "Session (5h)",
+     "short_label": "5h",
+     "title": "5-hour limit",
+     "percent": 62,
+     "level": "ok",
+     "resets_at_epoch": 1789382400,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_all",
+     "label": "Week (all models)",
+     "short_label": "7d",
+     "title": "Weekly \u00b7 all models",
+     "percent": 79,
+     "level": "warning",
+     "resets_at_epoch": 1789884000,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_scoped",
+     "label": "Fable",
+     "short_label": "Fable",
+     "title": "Weekly \u00b7 Fable",
+     "percent": 15,
+     "level": "ok",
+     "resets_at_epoch": 1789884000,
+     "general": false,
+     "preferred": true
+    }
+   ]
+  },
+  {
+   "name": "personal",
+   "email": "personal@example.com",
+   "active": false,
+   "disabled": false,
+   "status": "ok",
+   "detail": "ok",
+   "source": "api",
+   "space": "personal",
+   "plan_label": "max 20x",
+   "limit_reset": true,
+   "needs_login": false,
+   "binding": {
+    "label": "7d",
+    "percent": 22,
+    "headroom": 78,
+    "level": "ok",
+    "resets_at_epoch": 1789887600
+   },
+   "saturated": [],
+   "limits": [
+    {
+     "kind": "session",
+     "label": "Session (5h)",
+     "short_label": "5h",
+     "title": "5-hour limit",
+     "percent": 0,
+     "level": "ok",
+     "resets_at_epoch": null,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_all",
+     "label": "Week (all models)",
+     "short_label": "7d",
+     "title": "Weekly \u00b7 all models",
+     "percent": 22,
+     "level": "ok",
+     "resets_at_epoch": 1789887600,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_scoped",
+     "label": "Fable",
+     "short_label": "Fable",
+     "title": "Weekly \u00b7 Fable",
+     "percent": 2,
+     "level": "ok",
+     "resets_at_epoch": 1789887600,
+     "general": false,
+     "preferred": true
+    }
+   ]
+  },
+  {
+   "name": "team-seat",
+   "email": "team-seat@example.com",
+   "active": false,
+   "disabled": false,
+   "status": "ok",
+   "detail": "ok",
+   "source": "api",
+   "space": "personal",
+   "plan_label": "max 20x",
+   "limit_reset": true,
+   "needs_login": false,
+   "binding": {
+    "label": "5h",
+    "percent": 5,
+    "headroom": 95,
+    "level": "ok",
+    "resets_at_epoch": 1789372799
+   },
+   "saturated": [],
+   "limits": [
+    {
+     "kind": "session",
+     "label": "Session (5h)",
+     "short_label": "5h",
+     "title": "5-hour limit",
+     "percent": 5,
+     "level": "ok",
+     "resets_at_epoch": 1789372799,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_all",
+     "label": "Week (all models)",
+     "short_label": "7d",
+     "title": "Weekly \u00b7 all models",
+     "percent": 1,
+     "level": "ok",
+     "resets_at_epoch": 1789927199,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_scoped",
+     "label": "Fable",
+     "short_label": "Fable",
+     "title": "Weekly \u00b7 Fable",
+     "percent": 0,
+     "level": "ok",
+     "resets_at_epoch": 1789927200,
+     "general": false,
+     "preferred": true
+    }
+   ]
+  },
+  {
+   "name": "spare",
+   "email": "spare@example.com",
+   "active": false,
+   "disabled": false,
+   "status": "ok",
+   "detail": "ok",
+   "source": "api",
+   "space": "personal",
+   "plan_label": "max 20x",
+   "limit_reset": true,
+   "needs_login": false,
+   "binding": {
+    "label": "7d",
+    "percent": 95,
+    "headroom": 5,
+    "level": "critical",
+    "resets_at_epoch": 1789477200
+   },
+   "saturated": [
+    "Fable"
+   ],
+   "limits": [
+    {
+     "kind": "session",
+     "label": "Session (5h)",
+     "short_label": "5h",
+     "title": "5-hour limit",
+     "percent": 0,
+     "level": "ok",
+     "resets_at_epoch": null,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_all",
+     "label": "Week (all models)",
+     "short_label": "7d",
+     "title": "Weekly \u00b7 all models",
+     "percent": 95,
+     "level": "critical",
+     "resets_at_epoch": 1789477200,
+     "general": true,
+     "preferred": false
+    },
+    {
+     "kind": "weekly_scoped",
+     "label": "Fable",
+     "short_label": "Fable",
+     "title": "Weekly \u00b7 Fable",
+     "percent": 100,
+     "level": "critical",
+     "resets_at_epoch": 1789477200,
+     "general": false,
+     "preferred": true
+    }
+   ]
+  },
+  {
+   "name": "side-project",
+   "email": "side-project@example.com",
+   "active": false,
+   "disabled": true,
+   "status": "rate_limited",
+   "detail": "the API is rate limiting us",
+   "source": "api",
+   "space": "personal",
+   "plan_label": "",
+   "limit_reset": false,
+   "needs_login": false,
+   "binding": null,
+   "saturated": [],
+   "limits": []
+  }
+ ],
+ "auto": true,
+ "actions": [
+  {
+   "command": "",
+   "about": "what every account has left, as a table"
+  },
+  {
+   "command": "--json",
+   "about": "the same, machine-readable"
+  },
+  {
+   "command": "--force",
+   "about": "re-read now, skipping the per-account waiting periods"
+  },
+  {
+   "command": "--switch NAME",
+   "about": "make that profile the active one"
+  },
+  {
+   "command": "--reconnect NAME",
+   "about": "log a profile back in, active account untouched"
+  },
+  {
+   "command": "--add NAME",
+   "about": "save the credentials in use now as a new profile"
+  },
+  {
+   "command": "--rename OLD NEW",
+   "about": "rename a profile"
+  },
+  {
+   "command": "--remove NAME",
+   "about": "delete a profile (refused while it is in use)"
+  },
+  {
+   "command": "--off NAME",
+   "about": "switch an account off: shown, never chosen"
+  },
+  {
+   "command": "--on NAME",
+   "about": "switch an account back on"
+  },
+  {
+   "command": "--auto on|off",
+   "about": "arm or disarm automatic switching"
+  },
+  {
+   "command": "--mode model|endurance",
+   "about": "which goal the policy optimises for"
+  },
+  {
+   "command": "--tick",
+   "about": "run one auto-switch decision now"
+  },
+  {
+   "command": "--history",
+   "about": "write and open the usage history page"
+  },
+  {
+   "command": "--actions",
+   "about": "this list, as JSON"
+  }
+ ],
+ "fleet": "3/5 usable \u00b7 1 off \u00b7 203% weekly in reserve \u00b7 spare frees up in 1d",
+ "mode": "endurance",
+ "modes": [
+  {
+   "name": "model",
+   "title": "model \u2014 keep Fable available"
+  },
+  {
+   "name": "endurance",
+   "title": "endurance \u2014 spend what resets soonest"
+  }
+ ],
+ "show_saturated": false,
+ "throttled_for": 116,
+ "throttle_notice": null,
+ "poll_after_sec": 300,
+ "next": {
+  "name": "work",
+  "reason": "already the best account available",
+  "blocked_by": null,
+  "staying": true,
+  "after": "personal"
+ }
+}

@@ -36,7 +36,11 @@ with a single keypress, and hosts the auto-switch toggle.
 **ClaudiniBar** — a menu bar app showing the active profile and its remaining
 headroom, with one-click switching and the same auto toggle.
 
-All three read the same state, so a toggle in one shows up in the others.
+**Claude usage widget** — the same figures on the desktop or in Notification
+Center, in three sizes, with each account's on/off switch. Comes with
+ClaudiniBar.
+
+All of them read the same state, so a toggle in one shows up in the others.
 
 ## Auto-switching
 
@@ -99,6 +103,44 @@ the menu bar, or `claudini-usage --auto on`.
 > Switching profiles rewrites `~/.claude.json` and the keychain entry; a session
 > that is already up has its credentials in memory. Auto-switching decides which
 > account your *next* session gets. Relaunch `claude` for it to take effect.
+
+## The widget
+
+![the widget in its three sizes](docs/widget.png)
+
+Right-click the desktop › **Edit Widgets**, search for **Claude usage**, and drag
+one out. It comes in three sizes:
+
+- **small** — one account: the ring for the window that binds, and when it resets
+- **medium** — one account in full: every limit with its bar
+- **large** — the whole fleet: the account in use, then every other account
+  with its bar and its on/off switch, plus a refresh button
+
+Right-click the widget › **Edit "Claude usage"** to choose the account it
+follows — *Account in use* (the default, follows every switch) or a specific
+one — and whether switched-off accounts are listed.
+
+**How it gets its figures.** A widget is sandboxed: it cannot run the engine,
+read the keychain or touch `~/.claudini`. So ClaudiniBar does all of that as
+before and leaves the engine's latest answer in a folder the two share (an App
+Group container). The widget draws that. Its buttons don't act themselves
+either: they leave a request in the same folder, and ClaudiniBar carries it
+out exactly as a click in its menu would — within a second or so.
+
+**It needs ClaudiniBar running.** If the app has not written anything for 20
+minutes, the widget says so in orange rather than showing old figures as if
+they were current.
+
+**It is not live.** macOS rations how often an app that is never in front may
+redraw its widgets. ClaudiniBar redraws it when something visible moves — the
+account in use, a switch, a status, a bar by 3 points — and at least every half
+hour. "Resets in" keeps counting down in between on its own.
+
+To check a layout without placing a widget, render it from the current figures:
+
+```sh
+/Applications/ClaudiniBar.app/Contents/MacOS/ClaudiniBar --widget-previews /tmp/previews
+```
 
 ## Switching an account off
 
@@ -189,7 +231,12 @@ when that is happening and for how long.
 
 ## Install
 
-Requires macOS, Python 3.9+, and Xcode Command Line Tools for the menu bar app.
+Requires macOS 14+, Python 3.9+, and Xcode Command Line Tools for the menu bar
+app. The widget additionally needs Xcode and an **Apple Development**
+certificate — free with any Apple ID, from Xcode › Settings › Accounts ›
+Manage Certificates. The widget shares a folder with the app, and macOS only
+allows that between apps signed by the same team; `install.sh` finds your team
+from the certificate. Without them you get the menu bar app on its own.
 claudini is optional; if you have no profiles yet, log in with Claude Code as
 usual and run `claudini-usage --add NAME` to turn that login into the first one.
 
@@ -210,6 +257,11 @@ It does not start by itself after a restart unless you ask it to:
 
 That registers an ordinary login item, removable from System Settings >
 General > Login Items like anything else.
+
+The Xcode project is generated from `project.yml` with
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) and committed, so building
+needs Xcode alone. Change `project.yml` and run `xcodegen generate` rather than
+editing the project.
 
 The app icon is drawn by `menubar/make-icon.py` and committed as `.icns`, so
 installing needs nothing beyond a shell. Re-run that script if you change the

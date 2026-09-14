@@ -1,0 +1,486 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 77;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		06B95189E0B992C302528642 /* Wording.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B2C3AA62EABC18EAAE822CB /* Wording.swift */; };
+		1D2FB828A0F2C7C697F5A08F /* Contract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBA33AAF0C228E1959F2D50 /* Contract.swift */; };
+		1F5DB2F0EA6BA6FC2D614E21 /* Wording.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3B2C3AA62EABC18EAAE822CB /* Wording.swift */; };
+		23D786C516B1E562A9FC0306 /* WidgetIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = DD39FADD5407EFDDF1627305 /* WidgetIntents.swift */; };
+		2FB9139F4360A6D78425D1B5 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B7E7A04658A5820931FFBC /* SharedStore.swift */; };
+		38E9C5FA8B9D548D63B7A72B /* WidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A0677BEFA8DE669C104712 /* WidgetViews.swift */; };
+		4C16D73A9CDD32D0CB655F53 /* Contract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBA33AAF0C228E1959F2D50 /* Contract.swift */; };
+		7B11F9EBC48F07B271DD2348 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B7E7A04658A5820931FFBC /* SharedStore.swift */; };
+		829E4FAF2B025ACAB8EFFF79 /* ClaudeWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87FB7E6B7D06BDCD129D3D5B /* ClaudeWidget.swift */; };
+		92C035DFB6497FCC565F4A8E /* WidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A0677BEFA8DE669C104712 /* WidgetViews.swift */; };
+		A1CF58B9C9D682D7098A4CA5 /* ClaudiniBar.icns in Resources */ = {isa = PBXBuildFile; fileRef = D5242A57D41855A4416708D5 /* ClaudiniBar.icns */; };
+		ADC380BA66E2B04403B91BC4 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63E6A8C8D151ECF7E3F3404E /* Views.swift */; };
+		B40DC12EA869F28A2D57F10D /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B21C8F98DF113E56C7C7CD2B /* main.swift */; };
+		D7DFC5071171DAC4DB97C15F /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2A80F37A06E6696CF209FCE /* Model.swift */; };
+		E740B595407B524EF0347F79 /* ClaudiniWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CBC5043073E8CC0020FB8C65 /* ClaudiniWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		282F4E3FC5BB498B17F82AAC /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 1BB43407300CE6032E397719 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 3100FDF8F165EB66DE94B1AF;
+			remoteInfo = ClaudiniWidget;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		51B4D962F459A2E260989747 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				E740B595407B524EF0347F79 /* ClaudiniWidget.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		0EBA33AAF0C228E1959F2D50 /* Contract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Contract.swift; sourceTree = "<group>"; };
+		20A0677BEFA8DE669C104712 /* WidgetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetViews.swift; sourceTree = "<group>"; };
+		3B2C3AA62EABC18EAAE822CB /* Wording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wording.swift; sourceTree = "<group>"; };
+		63E6A8C8D151ECF7E3F3404E /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
+		87FB7E6B7D06BDCD129D3D5B /* ClaudeWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeWidget.swift; sourceTree = "<group>"; };
+		A2A80F37A06E6696CF209FCE /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
+		B21C8F98DF113E56C7C7CD2B /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
+		B4B7E7A04658A5820931FFBC /* SharedStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedStore.swift; sourceTree = "<group>"; };
+		B9E0D4E33578D58296867A2C /* ClaudiniBar.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = ClaudiniBar.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		CBC5043073E8CC0020FB8C65 /* ClaudiniWidget.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ClaudiniWidget.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		D5242A57D41855A4416708D5 /* ClaudiniBar.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = ClaudiniBar.icns; sourceTree = "<group>"; };
+		DD39FADD5407EFDDF1627305 /* WidgetIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetIntents.swift; sourceTree = "<group>"; };
+/* End PBXFileReference section */
+
+/* Begin PBXGroup section */
+		14F8716F851163C734FBBA41 /* shared */ = {
+			isa = PBXGroup;
+			children = (
+				0EBA33AAF0C228E1959F2D50 /* Contract.swift */,
+				B4B7E7A04658A5820931FFBC /* SharedStore.swift */,
+				3B2C3AA62EABC18EAAE822CB /* Wording.swift */,
+			);
+			path = shared;
+			sourceTree = "<group>";
+		};
+		154BD6CE5C6D42938CEBD0F7 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				B9E0D4E33578D58296867A2C /* ClaudiniBar.app */,
+				CBC5043073E8CC0020FB8C65 /* ClaudiniWidget.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+		93C94E77213304F8A3171DF3 /* menubar */ = {
+			isa = PBXGroup;
+			children = (
+				D5242A57D41855A4416708D5 /* ClaudiniBar.icns */,
+				B21C8F98DF113E56C7C7CD2B /* main.swift */,
+				A2A80F37A06E6696CF209FCE /* Model.swift */,
+				63E6A8C8D151ECF7E3F3404E /* Views.swift */,
+			);
+			path = menubar;
+			sourceTree = "<group>";
+		};
+		AAA3BB52CFA40B509CFC1C26 = {
+			isa = PBXGroup;
+			children = (
+				93C94E77213304F8A3171DF3 /* menubar */,
+				14F8716F851163C734FBBA41 /* shared */,
+				B8E263A216049B3305306982 /* widget */,
+				154BD6CE5C6D42938CEBD0F7 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		B8E263A216049B3305306982 /* widget */ = {
+			isa = PBXGroup;
+			children = (
+				87FB7E6B7D06BDCD129D3D5B /* ClaudeWidget.swift */,
+				DD39FADD5407EFDDF1627305 /* WidgetIntents.swift */,
+				20A0677BEFA8DE669C104712 /* WidgetViews.swift */,
+			);
+			path = widget;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		3100FDF8F165EB66DE94B1AF /* ClaudiniWidget */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 70FF051BBF637688098610F4 /* Build configuration list for PBXNativeTarget "ClaudiniWidget" */;
+			buildPhases = (
+				712A50300EC5AA43F2B61961 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = ClaudiniWidget;
+			packageProductDependencies = (
+			);
+			productName = ClaudiniWidget;
+			productReference = CBC5043073E8CC0020FB8C65 /* ClaudiniWidget.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+		F31F5D665B3D206B5036E036 /* ClaudiniBar */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = E9CDC6B758708068B5669338 /* Build configuration list for PBXNativeTarget "ClaudiniBar" */;
+			buildPhases = (
+				D8CE150DC2E0A3BCD53A4E92 /* Sources */,
+				356EBE7B18822C42E4D837F8 /* Resources */,
+				51B4D962F459A2E260989747 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				DA45E6621F855512C4B030F6 /* PBXTargetDependency */,
+			);
+			name = ClaudiniBar;
+			packageProductDependencies = (
+			);
+			productName = ClaudiniBar;
+			productReference = B9E0D4E33578D58296867A2C /* ClaudiniBar.app */;
+			productType = "com.apple.product-type.application";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		1BB43407300CE6032E397719 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = YES;
+				LastUpgradeCheck = 1430;
+				TargetAttributes = {
+					3100FDF8F165EB66DE94B1AF = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+					F31F5D665B3D206B5036E036 = {
+						DevelopmentTeam = "";
+						ProvisioningStyle = Manual;
+					};
+				};
+			};
+			buildConfigurationList = 4F36C846F4C1BD80365227E5 /* Build configuration list for PBXProject "ClaudiniBar" */;
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				Base,
+				en,
+			);
+			mainGroup = AAA3BB52CFA40B509CFC1C26;
+			minimizedProjectReferenceProxies = 1;
+			preferredProjectObjectVersion = 77;
+			productRefGroup = 154BD6CE5C6D42938CEBD0F7 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				F31F5D665B3D206B5036E036 /* ClaudiniBar */,
+				3100FDF8F165EB66DE94B1AF /* ClaudiniWidget */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		356EBE7B18822C42E4D837F8 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A1CF58B9C9D682D7098A4CA5 /* ClaudiniBar.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		712A50300EC5AA43F2B61961 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				829E4FAF2B025ACAB8EFFF79 /* ClaudeWidget.swift in Sources */,
+				1D2FB828A0F2C7C697F5A08F /* Contract.swift in Sources */,
+				7B11F9EBC48F07B271DD2348 /* SharedStore.swift in Sources */,
+				23D786C516B1E562A9FC0306 /* WidgetIntents.swift in Sources */,
+				38E9C5FA8B9D548D63B7A72B /* WidgetViews.swift in Sources */,
+				1F5DB2F0EA6BA6FC2D614E21 /* Wording.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		D8CE150DC2E0A3BCD53A4E92 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				4C16D73A9CDD32D0CB655F53 /* Contract.swift in Sources */,
+				D7DFC5071171DAC4DB97C15F /* Model.swift in Sources */,
+				2FB9139F4360A6D78425D1B5 /* SharedStore.swift in Sources */,
+				ADC380BA66E2B04403B91BC4 /* Views.swift in Sources */,
+				92C035DFB6497FCC565F4A8E /* WidgetViews.swift in Sources */,
+				06B95189E0B992C302528642 /* Wording.swift in Sources */,
+				B40DC12EA869F28A2D57F10D /* main.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		DA45E6621F855512C4B030F6 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 3100FDF8F165EB66DE94B1AF /* ClaudiniWidget */;
+			targetProxy = 282F4E3FC5BB498B17F82AAC /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		10729EA9C86F7690F36B0B28 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = menubar/ClaudiniBar.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = menubar/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.github.claudini-console.bar";
+				PRODUCT_NAME = ClaudiniBar;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		35BAAE9800061D8F189FFA4C /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_GROUP = "$(DEVELOPMENT_TEAM).com.github.claudini-pilot";
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_DYNAMIC_NO_PIC = NO;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_OPTIMIZATION_LEVEL = 0;
+				GCC_PREPROCESSOR_DEFINITIONS = (
+					"$(inherited)",
+					"DEBUG=1",
+				);
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.1;
+				MTL_ENABLE_DEBUG_INFO = INCLUDE_SOURCE;
+				MTL_FAST_MATH = YES;
+				ONLY_ACTIVE_ARCH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		997F3B728D836BCBDC455ECF /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = widget/ClaudiniWidget.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = widget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.github.claudini-console.bar.widget";
+				PRODUCT_NAME = ClaudiniWidget;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = WIDGET;
+			};
+			name = Release;
+		};
+		C2AAD5811EDE9498003DC684 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				APP_GROUP = "$(DEVELOPMENT_TEAM).com.github.claudini-pilot";
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION = YES_AGGRESSIVE;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++14";
+				CLANG_CXX_LIBRARY = "libc++";
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CLANG_ENABLE_OBJC_WEAK = YES;
+				CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING = YES;
+				CLANG_WARN_BOOL_CONVERSION = YES;
+				CLANG_WARN_COMMA = YES;
+				CLANG_WARN_CONSTANT_CONVERSION = YES;
+				CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS = YES;
+				CLANG_WARN_DIRECT_OBJC_ISA_USAGE = YES_ERROR;
+				CLANG_WARN_DOCUMENTATION_COMMENTS = YES;
+				CLANG_WARN_EMPTY_BODY = YES;
+				CLANG_WARN_ENUM_CONVERSION = YES;
+				CLANG_WARN_INFINITE_RECURSION = YES;
+				CLANG_WARN_INT_CONVERSION = YES;
+				CLANG_WARN_NON_LITERAL_NULL_CONVERSION = YES;
+				CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF = YES;
+				CLANG_WARN_OBJC_LITERAL_CONVERSION = YES;
+				CLANG_WARN_OBJC_ROOT_CLASS = YES_ERROR;
+				CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER = YES;
+				CLANG_WARN_RANGE_LOOP_ANALYSIS = YES;
+				CLANG_WARN_STRICT_PROTOTYPES = YES;
+				CLANG_WARN_SUSPICIOUS_MOVE = YES;
+				CLANG_WARN_UNGUARDED_AVAILABILITY = YES_AGGRESSIVE;
+				CLANG_WARN_UNREACHABLE_CODE = YES;
+				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
+				CODE_SIGN_IDENTITY = "Apple Development";
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				CODE_SIGN_STYLE = Manual;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = "";
+				ENABLE_HARDENED_RUNTIME = NO;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				GCC_C_LANGUAGE_STANDARD = gnu11;
+				GCC_NO_COMMON_BLOCKS = YES;
+				GCC_WARN_64_TO_32_BIT_CONVERSION = YES;
+				GCC_WARN_ABOUT_RETURN_TYPE = YES_ERROR;
+				GCC_WARN_UNDECLARED_SELECTOR = YES;
+				GCC_WARN_UNINITIALIZED_AUTOS = YES_AGGRESSIVE;
+				GCC_WARN_UNUSED_FUNCTION = YES;
+				GCC_WARN_UNUSED_VARIABLE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 1.1;
+				MTL_ENABLE_DEBUG_INFO = NO;
+				MTL_FAST_MATH = YES;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				PROVISIONING_PROFILE_SPECIFIER = "";
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		D833CDD94C00AD3BC6973A44 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = widget/ClaudiniWidget.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = widget/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.github.claudini-console.bar.widget";
+				PRODUCT_NAME = ClaudiniWidget;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = WIDGET;
+			};
+			name = Debug;
+		};
+		E56784083027BC96695C96DF /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = menubar/ClaudiniBar.entitlements;
+				COMBINE_HIDPI_IMAGES = YES;
+				INFOPLIST_FILE = menubar/Info.plist;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = "com.github.claudini-console.bar";
+				PRODUCT_NAME = ClaudiniBar;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		4F36C846F4C1BD80365227E5 /* Build configuration list for PBXProject "ClaudiniBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				35BAAE9800061D8F189FFA4C /* Debug */,
+				C2AAD5811EDE9498003DC684 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		70FF051BBF637688098610F4 /* Build configuration list for PBXNativeTarget "ClaudiniWidget" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				D833CDD94C00AD3BC6973A44 /* Debug */,
+				997F3B728D836BCBDC455ECF /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+		E9CDC6B758708068B5669338 /* Build configuration list for PBXNativeTarget "ClaudiniBar" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				E56784083027BC96695C96DF /* Debug */,
+				10729EA9C86F7690F36B0B28 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Debug;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = 1BB43407300CE6032E397719 /* Project object */;
+}

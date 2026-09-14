@@ -1,0 +1,79 @@
+# The Xcode project for ClaudiniBar and its widget, generated from this file:
+#
+#     xcodegen generate
+#
+# ClaudiniBar.xcodeproj is committed, so building needs Xcode alone. Edit this
+# file rather than the project, and regenerate.
+#
+# Signing uses your own "Apple Development" certificate: install.sh finds its
+# team and passes it as DEVELOPMENT_TEAM. The widget needs that — it shares a
+# folder with the app, and only apps signed by the same team may.
+name: ClaudiniBar
+options:
+  deploymentTarget:
+    macOS: "14.0"
+  createIntermediateGroups: true
+settings:
+  base:
+    CODE_SIGN_STYLE: Manual
+    CODE_SIGN_IDENTITY: "Apple Development"
+    PROVISIONING_PROFILE_SPECIFIER: ""
+    DEVELOPMENT_TEAM: ""
+    SWIFT_VERSION: "5.0"
+    MARKETING_VERSION: "1.1"
+    CURRENT_PROJECT_VERSION: "1"
+    ENABLE_HARDENED_RUNTIME: NO
+    # No debugger entitlement in what gets installed.
+    CODE_SIGN_INJECT_BASE_ENTITLEMENTS: NO
+    APP_GROUP: "$(DEVELOPMENT_TEAM).com.github.claudini-pilot"
+targets:
+  ClaudiniBar:
+    type: application
+    platform: macOS
+    sources:
+      - path: menubar
+        excludes: ["make-icon.py", "Info.plist", "*.entitlements"]
+      - path: shared
+      - path: widget/WidgetViews.swift
+    info:
+      path: menubar/Info.plist
+      properties:
+        CFBundleName: ClaudiniBar
+        CFBundleDisplayName: ClaudiniBar
+        CFBundleIconFile: ClaudiniBar
+        LSUIElement: true
+        ClaudiniAppGroup: "$(APP_GROUP)"
+    entitlements:
+      path: menubar/ClaudiniBar.entitlements
+      properties:
+        com.apple.security.application-groups: ["$(APP_GROUP)"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.github.claudini-console.bar
+        PRODUCT_NAME: ClaudiniBar
+    dependencies:
+      - target: ClaudiniWidget
+  ClaudiniWidget:
+    type: app-extension
+    platform: macOS
+    sources:
+      - path: widget
+        excludes: ["Info.plist", "*.entitlements"]
+      - path: shared
+    info:
+      path: widget/Info.plist
+      properties:
+        CFBundleDisplayName: Claude usage
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+        ClaudiniAppGroup: "$(APP_GROUP)"
+    entitlements:
+      path: widget/ClaudiniWidget.entitlements
+      properties:
+        com.apple.security.app-sandbox: true
+        com.apple.security.application-groups: ["$(APP_GROUP)"]
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.github.claudini-console.bar.widget
+        PRODUCT_NAME: ClaudiniWidget
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: WIDGET

@@ -40,22 +40,65 @@ ln -sfn "$REPO/src/claudini_usage.py" "$BIN/claudini-usage"
 ln -sfn "$REPO/src/claudini_auto.py"  "$BIN/claudini-auto"
 echo "commandes  -> $BIN/claudini-usage, $BIN/claudini-auto"
 
-if command -v swiftc >/dev/null; then
-  BUILD="$(mktemp -d)"
-  trap 'rm -rf "$BUILD"' EXIT      # a failed compile used to leave it behind
-  swiftc -O -o "$BUILD/ClaudiniBar" "$REPO"/menubar/*.swift -framework AppKit
+# The app, with its widget when this Mac can sign one: that takes Xcode and an
+# "Apple Development" certificate (free with any Apple ID, from Xcode >
+# Settings > Accounts). The widget shares a folder with the app, and macOS only
+# allows that between apps signed by the same team.
+TEAM="$(security find-certificate -c "Apple Development" -p 2>/dev/null \
+        | openssl x509 -noout -subject 2>/dev/null \
+        | sed -n 's/.*OU *= *\([A-Z0-9]*\).*/\1/p' | head -1)"
+BUILD="$(mktemp -d)"
+trap 'rm -rf "$BUILD"' EXIT      # a failed build used to leave it behind
+
+built=""
+if [ -n "$TEAM" ] && xcodebuild -version >/dev/null 2>&1; then
+  if xcodebuild -project "$REPO/ClaudiniBar.xcodeproj" -scheme ClaudiniBar \
+       -configuration Release -derivedDataPath "$BUILD" DEVELOPMENT_TEAM="$TEAM" \
+       build >"$BUILD/build.log" 2>&1; then
+    built="$BUILD/Build/Products/Release/ClaudiniBar.app"
+  else
+    grep -E "error:" "$BUILD/build.log" | sort -u | head -20
+    echo "Xcode build failed — falling back to the menu bar app without its widget"
+  fi
+fi
+
+if [ -z "$built" ] && command -v swiftc >/dev/null; then
+  [ -n "$TEAM" ] || echo "note: no Apple Development certificate — building without the widget"
+  mkdir -p "$BUILD/ClaudiniBar.app/Contents/MacOS" "$BUILD/ClaudiniBar.app/Contents/Resources"
+  swiftc -O -o "$BUILD/ClaudiniBar.app/Contents/MacOS/ClaudiniBar" \
+    "$REPO"/menubar/*.swift "$REPO"/shared/*.swift "$REPO/widget/WidgetViews.swift" \
+    -framework AppKit -framework SwiftUI -framework WidgetKit
+  # Xcode fills in the build settings; this build has none to fill in.
+  sed -e 's/$(EXECUTABLE_NAME)/ClaudiniBar/; s/$(PRODUCT_BUNDLE_IDENTIFIER)/com.github.claudini-console.bar/' \
+      -e 's/$(PRODUCT_NAME)/ClaudiniBar/; s/$(PRODUCT_BUNDLE_PACKAGE_TYPE)/APPL/' \
+      -e 's/$(MARKETING_VERSION)/1.1/; s/$(CURRENT_PROJECT_VERSION)/1/' \
+      -e 's/$(DEVELOPMENT_LANGUAGE)/en/; s/$(MACOSX_DEPLOYMENT_TARGET)/14.0/' \
+      "$REPO/menubar/Info.plist" > "$BUILD/ClaudiniBar.app/Contents/Info.plist"
+  plutil -remove ClaudiniAppGroup "$BUILD/ClaudiniBar.app/Contents/Info.plist" >/dev/null
+  cp "$REPO/menubar/ClaudiniBar.icns" "$BUILD/ClaudiniBar.app/Contents/Resources/"
+  codesign --force --sign - "$BUILD/ClaudiniBar.app" >/dev/null 2>&1 || true
+  built="$BUILD/ClaudiniBar.app"
+fi
+
+if [ -n "$built" ]; then
   pkill -f "ClaudiniBar.app" 2>/dev/null || true
-  mkdir -p "$APP/Contents/MacOS"
-  cp "$BUILD/ClaudiniBar" "$APP/Contents/MacOS/ClaudiniBar"
-  cp "$REPO/menubar/Info.plist" "$APP/Contents/Info.plist"
-  mkdir -p "$APP/Contents/Resources"
-  cp "$REPO/menubar/ClaudiniBar.icns" "$APP/Contents/Resources/"
+  rm -rf "$APP"
+  ditto "$built" "$APP"
+  # Building registers the copy in the build folder with macOS, widget and
+  # all. Left behind, it lingers after the folder is gone: a second "Claude
+  # usage" in the widget gallery, and a stale target for opening the app.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -u "$built" >/dev/null 2>&1 || true
+  pluginkit -r "$built/Contents/PlugIns/ClaudiniWidget.appex" >/dev/null 2>&1 || true
   touch "$APP"                     # nudge Finder to re-read the icon
-  codesign --force --sign - "$APP" >/dev/null 2>&1 || true
-  echo "menu bar   -> $APP"
+  if [ -d "$APP/Contents/PlugIns/ClaudiniWidget.appex" ]; then
+    echo "menu bar   -> $APP  (with the Claude usage widget)"
+  else
+    echo "menu bar   -> $APP"
+  fi
   open "$APP"
 else
-  echo "swiftc absent (Xcode Command Line Tools) — app menu bar non construite"
+  echo "neither Xcode nor swiftc found — menu bar app not built"
 fi
 
 if ! osascript -e 'tell application "System Events" to get the name of every login item' \
