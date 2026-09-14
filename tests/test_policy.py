@@ -196,6 +196,56 @@ class Planning(unittest.TestCase):
         self.assertEqual(blocked, "waiting for a reset")
 
 
+class SwitchedOff(unittest.TestCase):
+    """An account you switched off is still read and shown, never chosen."""
+
+    def test_never_the_target_however_fresh(self):
+        rows = [account("here", session=50, active=True), account("fresh", session=0)]
+        for mode in cu.MODES:
+            plan = cu.plan_switch(rows, state(mode, disabled=["fresh"]))
+            self.assertEqual(plan[0]["name"], "here", mode)
+
+    def test_not_named_as_the_successor(self):
+        rows = [account("here", active=True), account("fresh", session=0),
+                account("spare", session=40)]
+        self.assertEqual(cu.runner_up(rows, state(disabled=["fresh"]))["name"], "spare")
+
+    def test_switching_off_the_account_in_use_moves_off_it(self):
+        rows = [account("here", session=10, active=True), account("other", session=40)]
+        target, why, blocked = cu.plan_switch(rows, state(enabled=True, disabled=["here"]))
+        self.assertEqual(target["name"], "other")
+        self.assertIn("switched off", why)
+        self.assertIsNone(blocked)
+
+    def test_not_offered_as_first_to_recover(self):
+        """Everything spent: name the wait on an account you can actually use."""
+        rows = [account("here", session=100, weekly_in=6, active=True),
+                account("off", session=100, weekly=100, weekly_in=1)]
+        target, _, _ = cu.plan_switch(rows, state(enabled=True, disabled=["off"]))
+        self.assertNotEqual(target and target["name"], "off")
+
+    def test_all_off_says_so(self):
+        rows = [account("a", active=True), account("b")]
+        target, why, _ = cu.plan_switch(rows, state(disabled=["a", "b"]))
+        self.assertIsNone(target)
+        self.assertIn("switched off", why)
+
+    def test_left_out_of_the_fleet_reserve(self):
+        rows = [account("a", weekly=60), account("b", weekly=90)]
+        summary = cu.fleet(rows, state(disabled=["a"]))
+        self.assertEqual(summary["weekly_reserve"], 10)
+        self.assertEqual((summary["usable"], summary["total"], summary["off"]), (1, 2, 1))
+        self.assertIn("1 off", cu.fleet_line(summary))
+
+    def test_listed_after_the_usable_ones_and_flagged(self):
+        rows = [account("off", session=0), account("second", session=40),
+                account("here", active=True)]
+        st = state(disabled=["off"])
+        self.assertEqual([p["name"] for p in cu.ranked(rows, st)], ["here", "second", "off"])
+        flags = {p["name"]: p["disabled"] for p in cu.for_json(rows, st)["profiles"]}
+        self.assertEqual(flags, {"here": False, "second": False, "off": True})
+
+
 class Ordering(unittest.TestCase):
     def test_active_first_then_policy_then_unusable_then_unreadable(self):
         rows = [account("broken", status=cu.NEEDS_LOGIN),
@@ -275,7 +325,7 @@ class Contract(unittest.TestCase):
         for key in ("profiles", "auto", "fleet", "actions", "mode", "modes",
                     "show_saturated", "throttle_notice", "poll_after_sec", "next"):
             self.assertIn(key, snap, key)
-        for key in ("name", "email", "active", "status", "detail", "limits",
+        for key in ("name", "email", "active", "disabled", "status", "detail", "limits",
                     "limit_reset", "needs_login", "space", "plan_label",
                     "binding", "saturated"):
             self.assertIn(key, snap["profiles"][0], key)
@@ -323,6 +373,26 @@ class Settings(unittest.TestCase):
             cu.STATE_FILE = os.path.join(HERE, "state-under-test.json")
             cu._write_json(cu.STATE_FILE, {"min_margin": 15})
             self.assertEqual(cu.load_state()["max_usage"], 85)
+        finally:
+            if os.path.exists(cu.STATE_FILE):
+                os.unlink(cu.STATE_FILE)
+            cu.STATE_FILE = original
+
+    def test_switching_off_and_on_again(self):
+        original = cu.STATE_FILE
+        try:
+            cu.STATE_FILE = os.path.join(HERE, "state-under-test.json")
+            cu.set_in_rotation("b", False)
+            cu.set_in_rotation("a", False)
+            cu.set_in_rotation("a", False)                 # twice is still once
+            self.assertEqual(cu.load_state()["disabled"], ["a", "b"])
+            cu.set_in_rotation("b", True)
+            self.assertEqual(cu.load_state()["disabled"], ["a"])
+            cu._carry_rotation("a", "renamed")
+            self.assertEqual(cu.load_state()["disabled"], ["renamed"])
+            cu._carry_rotation("renamed")                  # removed profile
+            self.assertEqual(cu.load_state()["disabled"], [])
+            self.assertEqual(cu.DEFAULT_STATE["disabled"], [])  # default untouched
         finally:
             if os.path.exists(cu.STATE_FILE):
                 os.unlink(cu.STATE_FILE)

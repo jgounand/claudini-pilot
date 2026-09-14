@@ -191,9 +191,14 @@ class Console:
         scr.refresh()
 
     def draw_row(self, scr, y, index, p):
-        bold = curses.A_BOLD if p["active"] else 0
+        # Switched off (`claudini-usage --off NAME`, or the menu bar's switch):
+        # still shown, dimmed, never chosen.
+        bold = (curses.A_DIM if cu.is_off(p, self.state)
+                else curses.A_BOLD if p["active"] else 0)
         self.put(scr, y, 0, " %s%d " % ("●" if p["active"] else " ", index), bold)
-        self.put(scr, y, COL["profile"], self.clip(p["name"], WIDTH["profile"]), bold)
+        self.put(scr, y, COL["profile"],
+                 self.clip(p["name"] + (" (off)" if cu.is_off(p, self.state) else ""),
+                           WIDTH["profile"]), bold)
         self.put(scr, y, COL["account"], self.clip(p["email"] or "?", WIDTH["account"]),
                  curses.A_DIM)
         # Two profiles can share one email in different workspaces: that column

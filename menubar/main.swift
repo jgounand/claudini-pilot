@@ -9,6 +9,7 @@ final class Bar: NSObject, NSMenuDelegate {
     var loadedAt = Date.distantPast
     var busy = false
     var timer: Timer?
+    var menuOpen = false
 
     override init() {
         super.init()
@@ -104,7 +105,10 @@ final class Bar: NSObject, NSMenuDelegate {
 
     // MARK: menu
 
+    func menuDidClose(_ menu: NSMenu) { menuOpen = false }
+
     func menuWillOpen(_ menu: NSMenu) {
+        menuOpen = true
         rebuild(menu)
         // The open menu is drawn from the snapshot we already have; only ask
         // the engine again when that snapshot has actually gone stale.
@@ -130,7 +134,11 @@ final class Bar: NSObject, NSMenuDelegate {
         // The account in use, drawn the way Claude draws its own limits.
         if let active {
             menu.addItem(row(SectionView("Using now")))
-            menu.addItem(row(AccountTitleView(active)))
+            let title = AccountTitleView(active)
+            title.addSwitch(on: !active.disabled, y: 6) { [weak self] on in
+                self?.setInRotation(active.name, on)
+            }
+            menu.addItem(row(title))
             if active.limits.isEmpty {
                 menu.addItem(row(StatusView(active)))
             } else {
@@ -148,9 +156,17 @@ final class Bar: NSObject, NSMenuDelegate {
             menu.addItem(row(SectionView("Other accounts · best first")))
             for profile in others {
                 let line = AccountRowView(profile)
-                line.onClick = { [weak self] in
-                    if profile.needs_login { self?.reconnect(profile.name) }
-                    else { self?.switchTo(profile.name) }
+                line.addSwitch(on: !profile.disabled, y: 6) { [weak self] on in
+                    self?.setInRotation(profile.name, on)
+                }
+                // A switched-off account is not somewhere to go: switch it on
+                // first, or the next automatic tick would move you straight
+                // back off it.
+                if !profile.disabled {
+                    line.onClick = { [weak self] in
+                        if profile.needs_login { self?.reconnect(profile.name) }
+                        else { self?.switchTo(profile.name) }
+                    }
                 }
                 menu.addItem(row(line))
             }
@@ -251,6 +267,20 @@ final class Bar: NSObject, NSMenuDelegate {
         }
     }
 
+    /// Put an account in or out of the rotation. Queued rather than dropped
+    /// while a poll is running — unlike a poll, this is something you asked
+    /// for — and the open menu is redrawn from the answer, so "Next session"
+    /// and the order reflect the change without closing it.
+    func setInRotation(_ name: String, _ on: Bool) {
+        engineQueue.async {
+            let (_, data) = engine([on ? "--on" : "--off", name, "--json"])
+            DispatchQueue.main.async {
+                self.apply(data)
+                if self.menuOpen, let menu = self.item.menu { self.rebuild(menu) }
+            }
+        }
+    }
+
     @objc func setMode(_ sender: NSMenuItem) {
         guard let name = sender.representedObject as? String else { return }
         // The engine answers a setting change with the new snapshot, so one
@@ -278,7 +308,18 @@ final class Bar: NSObject, NSMenuDelegate {
     @objc func quitApp() { NSApp.terminate(nil) }
 }
 
+/// Opening the app again from Finder or Launchpad shows its menu, rather
+/// than doing nothing visible.
+final class Delegate: NSObject, NSApplicationDelegate {
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
+        bar.item.button?.performClick(nil)
+        return false
+    }
+}
+
 let app = NSApplication.shared
 app.setActivationPolicy(.accessory)
 let bar = Bar()
+let delegate = Delegate()
+app.delegate = delegate
 app.run()

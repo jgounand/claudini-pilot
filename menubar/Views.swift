@@ -86,6 +86,39 @@ class MenuRow: NSView {
 
     var highlighted: Bool { hovering && onClick != nil }
 
+    // MARK: on/off switch
+
+    private var onToggle: ((Bool) -> Void)?
+
+    /// A small switch at the right edge of the first line. A real control
+    /// rather than a drawn one: clicking it leaves the menu open, the way
+    /// every switch in a Control Centre panel does. Returns where it starts, so
+    /// the text on that line can stop short of it.
+    @discardableResult
+    func addSwitch(on: Bool, y: CGFloat, _ action: @escaping (Bool) -> Void) -> NSSwitch {
+        let toggle = NSSwitch()
+        toggle.controlSize = .mini
+        toggle.state = on ? .on : .off
+        toggle.target = self
+        toggle.action = #selector(toggled(_:))
+        toggle.sizeToFit()
+        toggle.setFrameOrigin(NSPoint(x: bounds.width - inset - toggle.frame.width, y: y))
+        toggle.autoresizingMask = [.minXMargin]
+        addSubview(toggle)
+        onToggle = action
+        return toggle
+    }
+
+    /// Where the right-aligned text of the first line has to end.
+    var lineEnd: CGFloat {
+        subviews.compactMap { $0 as? NSSwitch }.first.map { $0.frame.minX - 8 }
+            ?? bounds.width - inset
+    }
+
+    @objc private func toggled(_ sender: NSSwitch) {
+        onToggle?(sender.state == .on)
+    }
+
     override func draw(_ dirtyRect: NSRect) {
         guard highlighted else { return }
         NSColor.controlAccentColor.setFill()
@@ -117,14 +150,15 @@ class MenuRow: NSView {
 
     /// Right-aligned text; returns where it starts so the left side can stop short.
     @discardableResult
-    func right(_ s: String, _ font: NSFont, _ colour: NSColor, y: CGFloat) -> CGFloat {
+    func right(_ s: String, _ font: NSFont, _ colour: NSColor, y: CGFloat,
+               end: CGFloat? = nil) -> CGFloat {
         let text = string(s, font, colour)
-        let x = bounds.width - inset - text.size().width
+        let x = (end ?? bounds.width - inset) - text.size().width
         text.draw(at: NSPoint(x: x, y: y))
         return x
     }
 
-    func bar(percent: Int, level: String, y: CGFloat, height: CGFloat) {
+    func bar(percent: Int, level: String, y: CGFloat, height: CGFloat, muted: Bool = false) {
         let track = NSRect(x: inset, y: y, width: bounds.width - 2 * inset, height: height)
         (highlighted ? NSColor.white.withAlphaComponent(0.28)
                      : NSColor.labelColor.withAlphaComponent(0.10)).setFill()
@@ -135,7 +169,7 @@ class MenuRow: NSView {
         // nothing used" rather than "missing".
         var fill = track
         fill.size.width = max(height, track.width * CGFloat(min(100, max(0, percent))) / 100)
-        (highlighted ? NSColor.white : barColor(level)).setFill()
+        (highlighted ? NSColor.white : muted ? NSColor.tertiaryLabelColor : barColor(level)).setFill()
         NSBezierPath(roundedRect: fill, xRadius: height / 2, yRadius: height / 2).fill()
     }
 
@@ -236,9 +270,12 @@ final class AccountTitleView: MenuRow {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ dirtyRect: NSRect) {
-        let plan = [profile.space, profile.plan_label].compactMap { $0 }
-            .filter { !$0.isEmpty }.joined(separator: " · ")
-        let planStart = right(plan, .systemFont(ofSize: 12), .secondaryLabelColor, y: 5)
+        let plan = profile.disabled ? "switched off"
+            : [profile.space, profile.plan_label].compactMap { $0 }
+                .filter { !$0.isEmpty }.joined(separator: " · ")
+        let planStart = right(plan, .systemFont(ofSize: 12),
+                              profile.disabled ? .systemOrange : .secondaryLabelColor,
+                              y: 5, end: lineEnd)
         left(profile.name, .systemFont(ofSize: 14, weight: .semibold), .labelColor, y: 4,
              width: planStart - inset - 8)
     }
@@ -306,17 +343,23 @@ final class AccountRowView: MenuRow {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        var valueStart = bounds.width - inset
+        // Switched off, the row stays readable but steps back: its figures
+        // still help you decide when to switch it on again.
+        let off = profile.disabled
+        var valueStart = lineEnd
         if let binding = profile.binding {
             valueStart = right(usage(binding.percent, resets: binding.resets_at_epoch,
                                      label: binding.label),
-                               .systemFont(ofSize: 12), .secondaryLabelColor, y: 6)
+                               .systemFont(ofSize: 12),
+                               off ? .tertiaryLabelColor : .secondaryLabelColor,
+                               y: 6, end: lineEnd)
         }
 
         // Name, then the workspace and plan in a quieter voice beside it.
-        let name = string(profile.name, .systemFont(ofSize: 13, weight: .medium), .labelColor)
+        let nameColour: NSColor = off ? .secondaryLabelColor : .labelColor
+        let name = string(profile.name, .systemFont(ofSize: 13, weight: .medium), nameColour)
         let nameWidth = min(name.size().width, valueStart - inset - 8)
-        left(profile.name, .systemFont(ofSize: 13, weight: .medium), .labelColor, y: 5,
+        left(profile.name, .systemFont(ofSize: 13, weight: .medium), nameColour, y: 5,
              width: nameWidth)
         let plan = [profile.space, profile.plan_label].compactMap { $0 }
             .filter { !$0.isEmpty }.joined(separator: " · ")
@@ -328,7 +371,7 @@ final class AccountRowView: MenuRow {
         }
 
         if let binding = profile.binding {
-            bar(percent: binding.percent, level: binding.level, y: 29, height: 5)
+            bar(percent: binding.percent, level: binding.level, y: 29, height: 5, muted: off)
         } else {
             let hint = profile.needs_login ? profile.detail + " — click to log in" : profile.detail
             left(hint, .systemFont(ofSize: 11), .systemRed, y: 26)

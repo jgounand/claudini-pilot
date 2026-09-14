@@ -100,6 +100,23 @@ the menu bar, or `claudini-usage --auto on`.
 > that is already up has its credentials in memory. Auto-switching decides which
 > account your *next* session gets. Relaunch `claude` for it to take effect.
 
+## Switching an account off
+
+Every account in the menu bar has a switch. Turn one off and it stays on screen
+with its figures, greyed out, but the policy never picks it: auto-switching
+won't move you there, it is never named as the next session, and its weekly
+allowance leaves the reserve figure. Turn it back on whenever you want.
+
+Use it for an account you want to keep for something else, or one you want to
+rest for a while. If you switch off the account **in use**, auto-switching
+moves you off it at the next tick, cooldown permitting. A switched-off account
+can't be clicked to switch to it — switch it on first, otherwise the next tick
+would move you straight back off.
+
+From a terminal: `claudini-usage --off NAME` and `claudini-usage --on NAME`.
+The list is kept in `~/.claudini/auto.json` under `disabled`, and it follows a
+profile through `--rename` and goes away with `--remove`.
+
 ## `/limit-reset`
 
 Claude Code has a hidden `/limit-reset` command: it clears your 5-hour session
@@ -208,6 +225,8 @@ claudini-usage --reconnect NAME  # OAuth login for one profile, active account u
 claudini-usage --add NAME      # save the credentials in use now as a new profile
 claudini-usage --rename OLD NEW
 claudini-usage --remove NAME   # refuses while the profile is in use
+claudini-usage --off NAME      # switch an account off: shown, never chosen
+claudini-usage --on NAME       # and back on
 claudini-usage --force         # re-read now, skipping the per-account waiting periods
 claudini-usage --history       # write and open the usage history page
 claudini-usage --actions       # the command list, as JSON (what the menu shows)
@@ -225,6 +244,7 @@ Tuning lives in `~/.claudini/auto.json`:
 | `mode` | `model` | `model` keeps Fable available, `endurance` spends what resets soonest |
 | `max_usage` | `95` | an account counts as spent once its fullest window reaches this % — lower it to move off an account *before* hitting the wall |
 | `cooldown_min` | `10` | minutes between two automatic switches |
+| `disabled` | `[]` | accounts switched off — set from the menu's switches or `--off` / `--on` |
 
 ## Switching, without claudini
 

@@ -32,6 +32,8 @@ struct Profile: Decodable {
     let name: String
     let email: String?
     let active: Bool
+    /// Switched off by you: still read and shown, never chosen by the policy.
+    let disabled: Bool
     let status: String
     let detail: String
     let limits: [Limit]

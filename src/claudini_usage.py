@@ -210,6 +210,9 @@ DEFAULT_STATE = {
     "max_usage": 95,
     "cooldown_min": 10,    # minimum delay between two automatic switches
     "last_switch": 0,
+    # Accounts you have switched off: still read and shown, never chosen. For
+    # an account you want to keep for something else, or rest for a while.
+    "disabled": [],
 }
 
 CACHE_VERSION = 7
@@ -398,6 +401,31 @@ def forget(name):
     with open_cache() as disk:
         disk["profiles"].pop(name, None)
         disk["identity"].pop(name, None)
+
+
+def set_in_rotation(name, on):
+    """Switch an account on or off for the policy.
+
+    Under the state lock and against the file as it is now, like every other
+    settings change, so two quick toggles cannot undo each other.
+    """
+    with guard("state"):
+        state = load_state()
+        off = [n for n in state["disabled"] if n != name]
+        state["disabled"] = sorted(off if on else off + [name])
+        save_state(state)
+        return state
+
+
+def _carry_rotation(old, new=None):
+    """Keep the on/off setting with a profile that is renamed, drop it with
+    one that is removed — a new profile reusing the name starts switched on."""
+    with guard("state"):
+        state = load_state()
+        if old in state["disabled"]:
+            state["disabled"] = sorted([n for n in state["disabled"] if n != old]
+                                       + ([new] if new else []))
+            save_state(state)
 
 
 def update_state(**changes):
@@ -910,6 +938,15 @@ def usable_accounts(rows, max_usage):
             if worst_general(p) is not None and worst_general(p) < max_usage]
 
 
+def is_off(p, state):
+    return p["name"] in state["disabled"]
+
+
+def in_rotation(rows, state):
+    """The accounts the policy may choose from: every one not switched off."""
+    return [p for p in rows if not is_off(p, state)]
+
+
 def preference(rows, state):
     """The usable accounts, best first, in the order the mode prefers them.
 
@@ -917,7 +954,7 @@ def preference(rows, state):
     the choice explain itself — otherwise the greenest-looking account not
     being chosen just looks like a bug.
     """
-    usable = usable_accounts(rows, state["max_usage"])
+    usable = usable_accounts(in_rotation(rows, state), state["max_usage"])
     if not usable:
         return []
     if state.get("mode") == MODE_ENDURANCE:
@@ -962,6 +999,8 @@ def _by_endurance(usable):
 
 def switch_trigger(active, target, state):
     """Why the active account should be abandoned, or None to stay."""
+    if is_off(active, state):
+        return "%s is switched off" % active["name"]
     if active["status"] != OK:
         return "current account unreachable"
     if (worst_general(active) or 100) >= state["max_usage"]:
@@ -1028,7 +1067,9 @@ def ranked(rows, state):
             return (0, 0, p["name"])
         if p["name"] in order:
             return (1, order[p["name"]], p["name"])
-        return (2 if p["status"] == OK else 3, 0, p["name"])
+        if is_off(p, state):
+            return (3, 0, p["name"])
+        return (2 if p["status"] == OK else 4, 0, p["name"])
 
     return sorted(rows, key=rank)
 
@@ -1041,14 +1082,17 @@ def fleet(rows, state):
     weekly allowance, added up across the accounts — that number is the answer
     to "can I keep working", and nothing else in the interface was saying it.
     """
-    readable = [p for p in rows if p["status"] == OK and p["limits"]]
+    # A switched-off account's allowance is not yours to spend, so it counts
+    # towards neither the reserve nor the accounts that could take over.
+    readable = [p for p in in_rotation(rows, state) if p["status"] == OK and p["limits"]]
     reserve = sum(100 - l["percent"]
                   for p in readable for l in p["limits"] if l["kind"] == "weekly_all")
     spent = [p for p in readable if (worst_general(p) or 100) >= state["max_usage"]]
     waiting = first_to_recover(spent, state["max_usage"])
     return {
-        "usable": len(usable_accounts(rows, state["max_usage"])),
+        "usable": len(usable_accounts(in_rotation(rows, state), state["max_usage"])),
         "total": len(rows),
+        "off": len(rows) - len(in_rotation(rows, state)),
         # In whole accounts: 191% is nearly two untouched weeks of allowance.
         "weekly_reserve": reserve,
         "next_free": ({"name": waiting["name"],
@@ -1059,8 +1103,10 @@ def fleet(rows, state):
 
 
 def fleet_line(summary):
-    parts = ["%d/%d usable" % (summary["usable"], summary["total"]),
-             "%d%% weekly in reserve" % summary["weekly_reserve"]]
+    parts = ["%d/%d usable" % (summary["usable"], summary["total"])]
+    if summary.get("off"):
+        parts.append("%d off" % summary["off"])
+    parts.append("%d%% weekly in reserve" % summary["weekly_reserve"])
     if summary["next_free"]:
         parts.append("%s frees up in %s" % (summary["next_free"]["name"],
                                             until(summary["next_free"]["in_sec"])))
@@ -1090,7 +1136,10 @@ def plan_switch(rows, state):
     if target is None:
         # Everything is spent. The account to name is the one whose window
         # reopens first, with the wait — that is the only actionable fact.
-        waiting = first_to_recover(rows, state["max_usage"])
+        candidates = in_rotation(rows, state)
+        if not candidates:
+            return None, "every account is switched off", "nothing to switch to"
+        waiting = first_to_recover(candidates, state["max_usage"])
         if waiting:
             return (waiting,
                     "everything is spent — first to free up, in %s"
@@ -1212,6 +1261,7 @@ def rename_profile(old, new):
         if active_profile() == old:
             _point_at(new)
             _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=new), indent=2)
+        _carry_rotation(old, new)
 
 
 def remove_profile(name):
@@ -1226,6 +1276,7 @@ def remove_profile(name):
             os.unlink(lock_path("refresh-" + name))
         _CONFIG_CACHE.clear()
         forget(name)
+        _carry_rotation(name)
 
 
 def auto_tick(rows=None):
@@ -1381,6 +1432,8 @@ def render(rows, plan=None):
             head += "  ·  %s" % r["space"]
         if plan_label(r):
             head += " (%s)" % plan_label(r)
+        if is_off(r, state):
+            head += "  \033[2m· switched off\033[0m\033[1m"
         if r.get("source") == "local":
             head += "  \033[2m· read from disk\033[0m\033[1m"
         print("\033[1m%s\033[0m" % head)
@@ -1444,6 +1497,8 @@ def for_json(rows, state, plan=None):
             "name": r["name"],
             "email": r["email"],
             "active": r["active"],
+            # Switched off: shown, never chosen by the policy.
+            "disabled": is_off(r, state),
             "status": r["status"],
             "detail": status_text(r),
             "source": r.get("source"),
@@ -1497,6 +1552,8 @@ ACTIONS = [
     ("--add NAME", "save the credentials in use now as a new profile"),
     ("--rename OLD NEW", "rename a profile"),
     ("--remove NAME", "delete a profile (refused while it is in use)"),
+    ("--off NAME", "switch an account off: shown, never chosen"),
+    ("--on NAME", "switch an account back on"),
     ("--auto on|off", "arm or disarm automatic switching"),
     ("--mode model|endurance", "which goal the policy optimises for"),
     ("--tick", "run one auto-switch decision now"),
@@ -1557,6 +1614,16 @@ def main():
             json.dump(for_json(collect(), state), sys.stdout)
             return
         print("auto: %s (%s mode)" % ("on" if state["enabled"] else "off", state["mode"]))
+        return
+
+    if command in ("--on", "--off"):             # --off NAME: out of the rotation
+        if len(args) < 2 or args[1] not in profiles():
+            sys.exit("no profile named %r" % (args[1] if len(args) > 1 else ""))
+        state = set_in_rotation(args[1], command == "--on")
+        if "--json" in args:
+            json.dump(for_json(collect(), state), sys.stdout)
+            return
+        print("%s: %s" % (args[1], "on" if command == "--on" else "off"))
         return
 
     if command == "--mode":                      # --mode model | endurance
