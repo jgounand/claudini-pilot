@@ -1295,7 +1295,7 @@ def auto_tick(rows=None):
     if not state["enabled"] or blocked or staying(rows, plan) or target is None:
         return rows, False, blocked or why, plan
     if not switch(target["name"]):
-        return rows, False, "`claudini use %s` failed" % target["name"], plan
+        return rows, False, "switching to %s failed" % target["name"], plan
 
     update_state(last_switch=dt.datetime.now().timestamp())
     record({"switch": {"from": active["name"], "to": target["name"], "why": why}})

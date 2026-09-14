@@ -281,7 +281,7 @@ artwork (it needs Pillow).
 ```sh
 claudini-usage                 # table of all profiles
 claudini-usage --json          # machine-readable, used by the menu bar app
-claudini-usage --switch NAME   # switch (wraps `claudini use`)
+claudini-usage --switch NAME   # make that profile the active one
 claudini-usage --reconnect NAME  # OAuth login for one profile, active account untouched
 claudini-usage --add NAME      # save the credentials in use now as a new profile
 claudini-usage --rename OLD NEW
@@ -373,9 +373,10 @@ inline SVG.
 python3 tests/test_policy.py
 ```
 
-34 tests over the deciding half of the engine — eligibility, both modes'
-rankings, what triggers a switch and what blocks it, the retry schedules, the
-status classification, and the settings migration. They run on hand-built rows:
+Tests over the deciding half of the engine — eligibility, both modes'
+rankings, what triggers a switch and what blocks it, switched-off accounts,
+the retry schedules, the status classification, the JSON the app and widget
+decode, and the settings. They run on hand-built rows:
 no network, no keychain, no waiting. The I/O around them is exercised by using
 the tool.
 

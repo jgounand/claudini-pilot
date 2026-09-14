@@ -1,20 +1,24 @@
 #!/usr/bin/env bash
-# The icon is committed rather than drawn here: menubar/make-icon.py is its
-# source, and regenerates it when the design changes.
-# Installe claudini-console : les deux commandes shell et l'app menu bar.
-# Tout est posé en lien symbolique vers ce dépôt — un `git pull` suffit ensuite.
+# Installs claudini-pilot: the two commands, linked back to this clone so a
+# `git pull` updates them, and ClaudiniBar with its widget.
+#
+#     ./install.sh                  install or update
+#     ./install.sh --at-login       also start ClaudiniBar at login
+#     ./install.sh --not-at-login   and undo that
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-APP_PATH="/Applications/ClaudiniBar.app"
-[ -w /Applications ] || APP_PATH="$HOME/Applications/ClaudiniBar.app"
+# /Applications, because that is the folder Finder's sidebar calls
+# "Applications"; ~/Applications is a different one you have to navigate to.
+APP="/Applications/ClaudiniBar.app"
+[ -w /Applications ] || APP="$HOME/Applications/ClaudiniBar.app"
 
 # A menu bar app that does not come back after a restart is a menu bar app you
 # stop trusting. Opt-in, and removable from System Settings > General >
 # Login Items like anything else.
 if [ "${1:-}" = "--at-login" ]; then
   osascript -e "tell application \"System Events\" to make login item at end \
-                with properties {path:\"$APP_PATH\", hidden:true}" >/dev/null
+                with properties {path:\"$APP\", hidden:true}" >/dev/null
   echo "will start at login"
 elif [ "${1:-}" = "--not-at-login" ]; then
   osascript -e 'tell application "System Events" to delete login item "ClaudiniBar"' \
@@ -23,14 +27,6 @@ elif [ "${1:-}" = "--not-at-login" ]; then
 fi
 TOOLS="$HOME/.claudini/tools"
 BIN="$HOME/.local/bin"
-# /Applications, because that is the folder Finder's sidebar calls
-# "Applications"; ~/Applications is a different one you have to navigate to.
-APP="/Applications/ClaudiniBar.app"
-[ -w /Applications ] || APP="$HOME/Applications/ClaudiniBar.app"
-
-# claudini is no longer required — this manages profiles, switching and logins
-# on its own — but if you already use it, the two read the same layout.
-command -v claudini >/dev/null || echo "note: claudini not found; not needed."
 
 mkdir -p "$TOOLS" "$BIN"
 ln -sfn "$REPO/src/claudini_usage.py" "$TOOLS/claudini_usage.py"
@@ -38,7 +34,7 @@ ln -sfn "$REPO/src/claudini_auto.py"  "$TOOLS/claudini_auto.py"
 ln -sfn "$REPO/src/claudini_history.py" "$TOOLS/claudini_history.py"
 ln -sfn "$REPO/src/claudini_usage.py" "$BIN/claudini-usage"
 ln -sfn "$REPO/src/claudini_auto.py"  "$BIN/claudini-auto"
-echo "commandes  -> $BIN/claudini-usage, $BIN/claudini-auto"
+echo "commands   -> $BIN/claudini-usage, $BIN/claudini-auto"
 
 # The app, with its widget when this Mac can sign one: that takes Xcode and an
 # "Apple Development" certificate (free with any Apple ID, from Xcode >
@@ -108,5 +104,5 @@ fi
 
 case ":$PATH:" in
   *":$BIN:"*) ;;
-  *) echo "ajoute $BIN à ton PATH" ;;
+  *) echo "add $BIN to your PATH" ;;
 esac

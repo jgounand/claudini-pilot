@@ -266,7 +266,7 @@ final class Bar: NSObject, NSMenuDelegate {
                 } else {
                     alert.alertStyle = .critical
                     alert.messageText = "Could not switch"
-                    alert.informativeText = "`claudini use \(name)` failed. Try it in a terminal."
+                    alert.informativeText = "Try `claudini-usage --switch \(name)` in a terminal to see why."
                 }
                 alert.runModal()
                 self.reload()
