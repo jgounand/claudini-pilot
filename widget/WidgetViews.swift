@@ -202,27 +202,33 @@ struct RefreshButton: View {
 }
 
 /// An account's switch: off keeps it out of the rotation.
+///
+/// Drawn, inside a plain button. A widget can only show SwiftUI's own shapes
+/// and text: a real switch is an AppKit control, which WidgetKit replaces with
+/// a yellow "not supported" square — exactly what the first version showed.
 struct RotationSwitch: View {
     let profile: Profile
 
     var body: some View {
         #if WIDGET
-        Toggle(isOn: !profile.disabled,
-               intent: SetInRotation(name: profile.name, on: profile.disabled)) { EmptyView() }
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .labelsHidden()
+        Button(intent: SetInRotation(name: profile.name, on: profile.disabled)) { knob }
+            .buttonStyle(.plain)
         #else
-        // A live switch is an AppKit control, and those cannot be rendered to
-        // an image; the previews draw one the same size instead.
-        let on = !profile.disabled
-        Capsule()
-            .fill(on ? Color.accentColor : Color.primary.opacity(0.15))
-            .frame(width: 26, height: 15)
-            .overlay(alignment: on ? .trailing : .leading) {
-                Circle().fill(.white).padding(1.5).shadow(radius: 0.5)
-            }
+        knob
         #endif
+    }
+
+    private var knob: some View {
+        let on = !profile.disabled
+        return Capsule()
+            .fill(on ? Color.blue : Color.primary.opacity(0.18))
+            .frame(width: 24, height: 14)
+            .overlay(alignment: on ? .trailing : .leading) {
+                Circle()
+                    .fill(Color.white)
+                    .padding(1.5)
+                    .shadow(color: .black.opacity(0.15), radius: 0.5, y: 0.5)
+            }
     }
 }
 

@@ -13,7 +13,9 @@ final class Bar: NSObject, NSMenuDelegate {
     var timer: Timer?
     var menuOpen = false
 
-    override init() {
+    /// `live: false` builds rows and nothing else — no engine, no timer, no
+    /// requests carried out — for drawing the menu into a picture.
+    init(live: Bool = true) {
         super.init()
         // Start on the right, near the clock. On a notched laptop macOS hides
         // whatever does not fit left of the notch, newest items first, so the
@@ -25,6 +27,7 @@ final class Bar: NSObject, NSMenuDelegate {
         let menu = NSMenu()
         menu.delegate = self
         item.menu = menu
+        guard live else { return }
         reload()
         schedule(defaultPoll)
         watchRequests()
@@ -416,6 +419,91 @@ func renderWidgetPreviews(into folder: URL, from file: URL?) {
         }
     }
     exit(0)
+}
+
+/// `ClaudiniBar --menu-preview DIR [SNAPSHOT.json]`: draw the open menu, light
+/// and dark, from the same rows the real one is built from. For the README,
+/// fed a made-up snapshot, so no real account appears in a picture.
+func renderMenuPreview(into folder: URL, from file: URL?) {
+    let data = file.flatMap { try? Data(contentsOf: $0) } ?? engine(["--json"]).1
+    guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { exit(1) }
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+
+    let preview = Bar(live: false)
+    preview.snapshot = snapshot
+    preview.loadedAt = Date()
+    let menu = NSMenu()
+    preview.rebuild(menu)
+    NSStatusBar.system.removeStatusItem(preview.item)
+
+    let pad: CGFloat = 6
+    let heights = menu.items.map { $0.view?.frame.height ?? ($0.isSeparatorItem ? 11 : 22) }
+    let size = NSSize(width: menuWidth, height: heights.reduce(pad * 2, +))
+
+    for (name, look) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
+        guard let appearance = NSAppearance(named: look),
+              let canvas = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
+                                            pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
+                                            samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
+                                            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
+        else { continue }
+        canvas.size = size
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: canvas)
+        appearance.performAsCurrentDrawingAppearance {
+            let panel = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5),
+                                     xRadius: 10, yRadius: 10)
+            (name == "dark" ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.965, alpha: 1)).setFill()
+            panel.fill()
+            NSColor.separatorColor.setStroke()
+            panel.stroke()
+
+            var top = size.height - pad
+            for (item, height) in zip(menu.items, heights) {
+                top -= height
+                let slot = NSRect(x: 0, y: top, width: size.width, height: height)
+                if let view = item.view {
+                    view.appearance = appearance
+                    view.setFrameSize(NSSize(width: size.width, height: height))
+                    if let rows = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                        view.cacheDisplay(in: view.bounds, to: rows)
+                        // Over the panel: a bitmap on its own is drawn as a
+                        // copy, and would punch its transparency through it.
+                        let image = NSImage(size: slot.size)
+                        image.addRepresentation(rows)
+                        image.draw(in: slot, from: .zero, operation: .sourceOver, fraction: 1)
+                    }
+                } else if item.isSeparatorItem {
+                    NSColor.separatorColor.setFill()
+                    NSRect(x: inset, y: slot.midY, width: size.width - 2 * inset, height: 1).fill()
+                } else {
+                    // A native item: its title, and the chevron or shortcut beside it.
+                    let font = NSFont.menuFont(ofSize: 13)
+                    let title = NSAttributedString(string: item.title, attributes: [
+                        .font: font, .foregroundColor: NSColor.labelColor])
+                    title.draw(at: NSPoint(x: inset, y: slot.minY + (height - title.size().height) / 2))
+                    let hint = item.submenu != nil ? "›"
+                        : item.keyEquivalent.isEmpty ? "" : "⌘" + item.keyEquivalent.uppercased()
+                    let side = NSAttributedString(string: hint, attributes: [
+                        .font: font, .foregroundColor: NSColor.secondaryLabelColor])
+                    side.draw(at: NSPoint(x: size.width - inset - side.size().width,
+                                          y: slot.minY + (height - side.size().height) / 2))
+                }
+            }
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        let file = folder.appendingPathComponent("menu-\(name).png")
+        try? canvas.representation(using: .png, properties: [:])?.write(to: file)
+        print(file.path)
+    }
+    exit(0)
+}
+
+if let flag = CommandLine.arguments.firstIndex(of: "--menu-preview"),
+   flag + 1 < CommandLine.arguments.count {
+    let arguments = CommandLine.arguments
+    renderMenuPreview(into: URL(fileURLWithPath: arguments[flag + 1]),
+                      from: flag + 2 < arguments.count ? URL(fileURLWithPath: arguments[flag + 2]) : nil)
 }
 
 if let flag = CommandLine.arguments.firstIndex(of: "--widget-previews"),

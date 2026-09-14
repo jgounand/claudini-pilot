@@ -36,6 +36,8 @@ with a single keypress, and hosts the auto-switch toggle.
 **ClaudiniBar** — a menu bar app showing the active profile and its remaining
 headroom, with one-click switching and the same auto toggle.
 
+![the menu, light and dark](docs/menu.png)
+
 **Claude usage widget** — the same figures on the desktop or in Notification
 Center, in three sizes, with each account's on/off switch. Comes with
 ClaudiniBar.
@@ -136,11 +138,18 @@ redraw its widgets. ClaudiniBar redraws it when something visible moves — the
 account in use, a switch, a status, a bar by 3 points — and at least every half
 hour. "Resets in" keeps counting down in between on its own.
 
-To check a layout without placing a widget, render it from the current figures:
+To check a layout without placing a widget, render it — from the current
+figures, or from a saved snapshot:
 
 ```sh
-/Applications/ClaudiniBar.app/Contents/MacOS/ClaudiniBar --widget-previews /tmp/previews
+ClaudiniBar=/Applications/ClaudiniBar.app/Contents/MacOS/ClaudiniBar
+$ClaudiniBar --widget-previews /tmp/previews
+$ClaudiniBar --menu-preview /tmp/previews docs/sample-snapshot.json
 ```
+
+The pictures in this README come from `docs/sample-snapshot.json`, a snapshot
+with made-up accounts: render from that rather than screenshotting your own
+menu, which would publish your account names and workspaces.
 
 ## Switching an account off
 
