@@ -92,6 +92,7 @@ if [ -n "$built" ]; then
   else
     echo "menu bar   -> $APP"
   fi
+  sleep 1                          # the old one has to be gone before this opens
   open "$APP"
 else
   echo "neither Xcode nor swiftc found — menu bar app not built"

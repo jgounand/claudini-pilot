@@ -245,7 +245,17 @@ final class Bar: NSObject, NSMenuDelegate {
     func row(_ view: NSView) -> NSMenuItem {
         let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
         item.view = view
+        // A click on a view in a menu reaches the item, not the view: without
+        // an action here, "Add account…", Refresh and switching did nothing.
+        if let clickable = view as? MenuRow, clickable.onClick != nil {
+            item.target = self
+            item.action = #selector(rowClicked(_:))
+        }
         return item
+    }
+
+    @objc func rowClicked(_ sender: NSMenuItem) {
+        (sender.view as? MenuRow)?.fire()
     }
 
     // MARK: actions

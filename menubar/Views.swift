@@ -50,10 +50,19 @@ class MenuRow: NSView {
     override func mouseEntered(with event: NSEvent) { hovering = true; needsDisplay = true }
     override func mouseExited(with event: NSEvent) { hovering = false; needsDisplay = true }
 
-    override func mouseUp(with event: NSEvent) {
-        guard let onClick else { return }
-        // Close the menu first: an alert or a new process started while the
-        // menu is still tracking would appear behind it.
+    override func mouseUp(with event: NSEvent) { fire() }
+
+    private var fired = false
+
+    /// Run the row's action, once. A click can reach a row two ways — the
+    /// view's own mouseUp, or the menu performing the item's action, which is
+    /// the only one macOS 26 delivers for a view in a menu — and whichever
+    /// comes first is the one that counts.
+    func fire() {
+        guard let onClick, !fired else { return }
+        fired = true
+        // Close the menu first: an alert or a window opened while the menu is
+        // still tracking would appear behind it.
         enclosingMenuItem?.menu?.cancelTracking()
         DispatchQueue.main.async(execute: onClick)
     }
