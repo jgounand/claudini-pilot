@@ -198,6 +198,31 @@ rather than offering a login for all of them:
 
 Only the first offers a login. The detail line carries the API's own wording.
 
+## Adding an account
+
+**Add account…** at the bottom of the account list — or `claudini-usage --add
+NAME` — asks for a name and opens Terminal for the login. Log in with the
+account you want to add.
+
+**Nothing you are using moves.** The login runs in a throwaway Claude Code
+configuration, with its own keychain entry: the account in use, its
+credentials, `~/.claude.json` and every open `claude` session stay exactly as
+they were, and nothing switches. The new profile appears in the menu as soon as
+the login completes.
+
+**It starts with your settings, not your identity.** The new profile copies how
+Claude Code is set up on this Mac — onboarding done, your projects and their
+trust, MCP servers, update and terminal preferences — so switching to it does
+not feel like a fresh install. It copies a fixed list of those, never
+the rest: the account's identity and IDs, cached usage and feature flags,
+overage consent and accepted terms stay behind, and so does anything a later
+Claude Code adds.
+
+**One account, one profile.** Logging in to an account you already have a
+profile for — same account in the same workspace — is refused, since two
+profiles would count one allowance twice. The same email in another workspace
+(a personal plan and a team seat) is a different account, and is fine.
+
 ## When an account needs a new login
 
 Refresh tokens expire after a few days, and an account whose token is dead shows
@@ -247,7 +272,8 @@ Manage Certificates. The widget shares a folder with the app, and macOS only
 allows that between apps signed by the same team; `install.sh` finds your team
 from the certificate. Without them you get the menu bar app on its own.
 claudini is optional; if you have no profiles yet, log in with Claude Code as
-usual and run `claudini-usage --add NAME` to turn that login into the first one.
+usual and run `claudini-usage --add-current NAME` to turn that login into the
+first one; add the others with **Add account…** (below).
 
 ```sh
 git clone https://github.com/jgounand/claudini-pilot.git
@@ -283,7 +309,8 @@ claudini-usage                 # table of all profiles
 claudini-usage --json          # machine-readable, used by the menu bar app
 claudini-usage --switch NAME   # make that profile the active one
 claudini-usage --reconnect NAME  # OAuth login for one profile, active account untouched
-claudini-usage --add NAME      # save the credentials in use now as a new profile
+claudini-usage --add NAME      # log a new account in as a profile, active account untouched
+claudini-usage --add-current NAME  # save the login in use now as a profile (your first one)
 claudini-usage --rename OLD NEW
 claudini-usage --remove NAME   # refuses while the profile is in use
 claudini-usage --off NAME      # switch an account off: shown, never chosen

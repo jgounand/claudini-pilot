@@ -354,7 +354,8 @@ final class AccountRowView: MenuRow {
 final class ActionRowView: MenuRow {
     let title: String, badge: String
 
-    init(title: String, badge: String) {
+    /// No badge, no pill: a plain action such as "Add account…".
+    init(title: String, badge: String = "") {
         self.title = title
         self.badge = badge
         super.init(height: 28)
@@ -364,7 +365,7 @@ final class ActionRowView: MenuRow {
 
     override func draw(_ dirtyRect: NSRect) {
         super.draw(dirtyRect)
-        let pillStart = pill(badge, y: 4)
+        let pillStart = badge.isEmpty ? bounds.width - inset : pill(badge, y: 4)
         left(title, .systemFont(ofSize: 13), .labelColor, y: 5, width: pillStart - inset - 8)
     }
 }

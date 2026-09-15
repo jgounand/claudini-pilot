@@ -31,6 +31,7 @@ final class Bar: NSObject, NSMenuDelegate {
         reload()
         schedule(defaultPoll)
         watchRequests()
+        watchProfiles()
     }
 
     /// The engine owns the cadence; re-arm whenever it says something else.
@@ -177,8 +178,13 @@ final class Bar: NSObject, NSMenuDelegate {
                 }
                 menu.addItem(row(line))
             }
-            menu.addItem(.separator())
         }
+        // Under the list, and there even when it is empty — the first extra
+        // account is when it is needed most.
+        let add = ActionRowView(title: "Add account…")
+        add.onClick = { [weak self] in self?.addAccount() }
+        menu.addItem(row(add))
+        menu.addItem(.separator())
 
         if let notice = snap.throttle_notice {
             menu.addItem(row(NoteView(notice)))
@@ -246,12 +252,74 @@ final class Bar: NSObject, NSMenuDelegate {
 
     /// The OAuth login needs a real terminal, so open one.
     func reconnect(_ name: String) {
-        let cmd = "claudini-usage --reconnect \(name)"
+        inTerminal("claudini-usage --reconnect \(name)")
+    }
+
+    /// Run a command in a new Terminal window. Only ever given a profile name
+    /// that has passed `validName`, so nothing in it means anything to a shell.
+    func inTerminal(_ command: String) {
         inBackground {
             run("/usr/bin/osascript", ["-e",
-                "tell application \"Terminal\" to do script \"\(cmd)\"",
+                "tell application \"Terminal\" to do script \"\(command)\"",
                 "-e", "tell application \"Terminal\" to activate"])
         }
+    }
+
+    /// The engine's rule for a profile name, checked here too so a bad one is
+    /// caught in the dialog rather than in a Terminal window.
+    func validName(_ name: String) -> Bool {
+        name.range(of: "^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$", options: .regularExpression) != nil
+    }
+
+    /// Name the account, then log in to it in Terminal. The login happens in a
+    /// throwaway Claude Code config: the account in use and open sessions are
+    /// not touched, and nothing switches.
+    func addAccount() {
+        let alert = NSAlert()
+        alert.messageText = "Add a Claude account"
+        alert.informativeText = "Give it a name, then log in with that account in the Terminal "
+            + "window that opens. The account you are using now, and your open sessions, "
+            + "are not touched."
+        let field = NSTextField(frame: NSRect(x: 0, y: 0, width: 260, height: 24))
+        field.placeholderString = "e.g. team-seat"
+        alert.accessoryView = field
+        alert.addButton(withTitle: "Continue")
+        alert.addButton(withTitle: "Cancel")
+        alert.window.initialFirstResponder = field
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let name = field.stringValue.trimmingCharacters(in: .whitespaces)
+        let taken = snapshot?.profiles.contains { $0.name == name } ?? false
+        guard validName(name), !taken else {
+            let problem = NSAlert()
+            problem.messageText = taken ? "There is already an account named \(name)"
+                                        : "That name can't be used"
+            problem.informativeText = "Up to 40 letters, digits, '.', '_' or '-', "
+                + "starting with a letter or a digit."
+            problem.runModal()
+            return
+        }
+        inTerminal("claudini-usage --add \(name)")
+    }
+
+    /// A profile added or removed from a terminal shows up without waiting for
+    /// the next poll. The folder changes when a profile's own folder appears,
+    /// a moment before its file is written — hence the short wait.
+    private var profilesWatch: DispatchSourceFileSystemObject?
+
+    func watchProfiles() {
+        let folder = NSString(string: "~/.claudini/profiles").expandingTildeInPath
+        let descriptor = open(folder, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: descriptor, eventMask: .write, queue: .main)
+        source.setEventHandler { [weak self] in
+            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { self?.reload() }
+        }
+        source.setCancelHandler { close(descriptor) }
+        source.resume()
+        profilesWatch = source
     }
 
     func switchTo(_ name: String) {

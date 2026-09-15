@@ -9,11 +9,15 @@ row. The I/O around them is exercised by using the tool.
     python3 tests/test_policy.py
 """
 
+import contextlib
 import datetime as dt
 import importlib.util
+import io
 import json
 import os
+import shutil
 import sys
+import tempfile
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -397,6 +401,107 @@ class Settings(unittest.TestCase):
             if os.path.exists(cu.STATE_FILE):
                 os.unlink(cu.STATE_FILE)
             cu.STATE_FILE = original
+
+
+
+class AddingAccounts(unittest.TestCase):
+    """Adding an account logs in somewhere the account in use cannot be reached.
+
+    The login itself needs a browser and a person; it is stood in for here, and
+    so is the keychain. What is tested is everything around it: what the new
+    profile gets, what it must not get, and what is never touched.
+    """
+
+    IN_USE = {"hasCompletedOnboarding": True,
+              "projects": {"/code": {"hasTrustDialogAccepted": True}},
+              "oauthAccount": {"accountUuid": "A", "organizationUuid": "O",
+                               "emailAddress": "in-use@example.com"},
+              "userID": "someone", "cachedGrowthBookFeatures": {"flag": True},
+              "cachedUsageUtilization": {"five_hour": 40},
+              "fableOverageConsentV2": {"granted": True}}
+    NEW = {"accountUuid": "B", "organizationUuid": "P", "emailAddress": "new@example.com"}
+    CREDS = {"claudeAiOauth": {"refreshToken": "new-token"}}
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.saved = {name: getattr(cu, name) for name in
+                      ("PROFILES_DIR", "CLAUDE_JSON", "sandbox_login", "keychain_write",
+                       "active_profile")}
+        cu.PROFILES_DIR = os.path.join(self.home, "profiles")
+        cu.CLAUDE_JSON = os.path.join(self.home, "claude.json")
+        cu._write_json(cu.CLAUDE_JSON, self.IN_USE)
+        self.keychain = {}
+        cu.keychain_write = lambda service, payload: self.keychain.update({service: payload}) or True
+        cu.active_profile = lambda: "in-use"
+        self.login(self.CREDS, self.NEW)
+        cu._CONFIG_CACHE.clear()
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(cu, name, value)
+        cu._CONFIG_CACHE.clear()
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def login(self, creds, account):
+        cu.sandbox_login = contextlib.contextmanager(lambda: (yield creds, account))
+
+    def add(self, name):
+        with contextlib.redirect_stdout(io.StringIO()):
+            return cu.add_account(name)
+
+    def existing(self, name, account):
+        cu._write_json(cu.profile_config(name), {"oauthAccount": account})
+
+    def test_the_new_profile_gets_your_settings_and_its_own_identity(self):
+        self.assertTrue(self.add("new"))
+        self.assertEqual(cu.profiles(), ["new"])
+        config = cu._read_json(cu.profile_config("new"), {})
+        self.assertEqual(config["oauthAccount"], self.NEW)
+        self.assertTrue(config["hasCompletedOnboarding"])
+        self.assertEqual(config["projects"], self.IN_USE["projects"])
+        self.assertEqual(self.keychain, {cu.profile_service("new"): self.CREDS})
+
+    def test_nothing_tied_to_the_account_in_use_is_copied(self):
+        self.add("new")
+        config = cu._read_json(cu.profile_config("new"), {})
+        for key in ("userID", "cachedGrowthBookFeatures", "cachedUsageUtilization",
+                    "fableOverageConsentV2"):
+            self.assertNotIn(key, config, key)
+
+    def test_the_account_in_use_is_left_exactly_as_it_was(self):
+        before = open(cu.CLAUDE_JSON).read()
+        self.add("new")
+        self.assertEqual(open(cu.CLAUDE_JSON).read(), before)
+        self.assertNotIn(cu.LIVE_SERVICE, self.keychain)
+
+    def test_the_same_login_twice_is_refused(self):
+        """Two profiles on one account would count one allowance twice."""
+        self.existing("already", self.NEW)
+        self.assertFalse(self.add("new"))
+        self.assertNotIn("new", cu.profiles())
+        self.assertEqual(self.keychain, {})
+
+    def test_the_same_person_in_another_workspace_is_another_account(self):
+        self.existing("personal", dict(self.NEW, organizationUuid="someone-else"))
+        self.assertTrue(self.add("team"))
+
+    def test_an_unfinished_login_adds_nothing(self):
+        self.login(None, {})
+        self.assertFalse(self.add("new"))
+        self.assertEqual((cu.profiles(), self.keychain), ([], {}))
+
+    def test_a_taken_name_is_refused_before_anyone_logs_in(self):
+        self.existing("taken", {"accountUuid": "Z"})
+        cu.sandbox_login = lambda: self.fail("asked for a login it could not use")
+        with self.assertRaises(ValueError):
+            self.add("taken")
+
+    def test_names(self):
+        for good in ("work", "team-seat", "joe.2", "A_1"):
+            cu.check_name(good)
+        for bad in ("", "-rf", ".hidden", "two words", "a;b", "x" * 41, "é"):
+            with self.assertRaises(ValueError, msg=bad):
+                cu.check_name(bad)
 
 
 if __name__ == "__main__":

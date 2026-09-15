@@ -30,6 +30,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 
@@ -1232,8 +1233,140 @@ def switch(name):
         return True
 
 
+# A profile's name ends up in a path, a keychain service name and a command
+# typed into Terminal, so it is kept to characters none of them treat specially.
+PROFILE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,39}$")
+
+
+def check_name(name):
+    if not PROFILE_NAME.match(name or ""):
+        raise ValueError("a profile name is up to 40 letters, digits, '.', '_' or '-', "
+                         "starting with a letter or a digit")
+
+
+# What a new profile takes from the one in use: how Claude Code is set up on
+# this Mac, so the new account does not start with onboarding and a trust
+# prompt in every project. A list of what to copy rather than of what to drop,
+# so that anything tied to an account — identity, IDs, cached usage and
+# feature flags, overage consent, accepted terms — stays behind, including
+# whatever a later Claude Code adds.
+INHERITED_SETTINGS = (
+    "hasCompletedOnboarding", "lastOnboardingVersion", "lastReleaseNotesSeen",
+    "projects", "mcpServers", "githubRepoPaths",
+    "autoUpdates", "autoUpdatesProtectedForNative", "installMethod",
+    "migrationVersion", "opusProMigrationComplete", "sonnet1m45MigrationComplete",
+    "fable5ToFableAliasMigrationTimestamp",
+    "optionAsMetaKeyInstalled", "deepLinkTerminal", "showSpinnerTree",
+    "defaultToAgentsView", "remoteControlAtStartup", "agentPushNotifEnabled",
+    "chromeExtension", "claudeInChromeDefaultEnabled", "hasCompletedClaudeInChromeOnboarding",
+    "officialMarketplaceAutoInstallAttempted", "officialMarketplaceAutoInstalled",
+    "tipsHistory", "effortCalloutDismissed", "effortCalloutV2Dismissed",
+)
+
+
+def inherited_settings(config):
+    return {key: config[key] for key in INHERITED_SETTINGS if key in config}
+
+
+def same_account(a, b):
+    """Two logins to the same account in the same workspace.
+
+    The email is not enough: one address can belong to a personal account and
+    a team seat, which are separate allowances and rightly separate profiles.
+    """
+    return (bool(a.get("accountUuid")) and a.get("accountUuid") == b.get("accountUuid")
+            and a.get("organizationUuid") == b.get("organizationUuid"))
+
+
+def duplicate_of(account):
+    """The profile that already holds this login, if any."""
+    return next((name for name in profiles()
+                 if same_account(account, profile_document(name).get("oauthAccount") or {})),
+                None)
+
+
+@contextlib.contextmanager
+def sandbox_login():
+    """Run `claude auth login` where it cannot reach the account in use.
+
+    The login gets a throwaway CLAUDE_CONFIG_DIR, and with it its own keychain
+    entry and its own claude.json: the live credentials, ~/.claude.json and
+    every running `claude` session are left exactly as they were. Yields
+    (credentials, oauthAccount); credentials is None when the login did not
+    complete. Whatever keychain entries the login created are deleted on the
+    way out, on every path — a stranded one holds a working refresh token that
+    nobody would ever notice.
+    """
+    before = claude_credential_services()
+    workdir = tempfile.mkdtemp(prefix="claudini-login-")
+    try:
+        subprocess.run(["claude", "auth", "login"],
+                       env=dict(os.environ, CLAUDE_CONFIG_DIR=workdir))
+        created = sorted(claude_credential_services() - before)
+        creds = keychain_read(created[0]) if created else None
+        if creds and "claudeAiOauth" not in creds:
+            creds = None
+        account = (_read_json(os.path.join(workdir, ".claude.json"), {})
+                   .get("oauthAccount") or {})
+        yield creds, account
+    finally:
+        for stray in claude_credential_services() - before:
+            keychain_delete(stray)
+        shutil.rmtree(workdir, ignore_errors=True)
+
+
+def settings_in_use():
+    """The claude.json of the account in use, read and never written.
+
+    Claude Code rewrites it while it runs; a read landing mid-write is retried
+    rather than giving the new profile no settings at all.
+    """
+    for _ in range(10):
+        config = _read_json(CLAUDE_JSON, None)
+        if isinstance(config, dict):
+            return config
+        time.sleep(0.2)
+    return {}
+
+
+def add_account(name):
+    """Log a new account in and keep it as a profile, the account in use untouched.
+
+    Returns whether a profile was added.
+    """
+    check_name(name)
+    if name in profiles():
+        raise ValueError("profile %r already exists" % name)
+    template = inherited_settings(settings_in_use())
+
+    print("\033[1mAdding %s\033[0m" % name)
+    # Flushed: the login's own output follows, and must not come first.
+    print("Log in with the account to add. Your active account (%s) and running "
+          "sessions stay put.\n" % (active_profile() or "?"), flush=True)
+    with sandbox_login() as (creds, account):
+        if not creds or not account:
+            print("\033[31mLogin did not complete — nothing added.\033[0m")
+            return False
+        twin = duplicate_of(account)
+        if twin:
+            print("\033[33m%s is already profile %s — nothing added.\033[0m"
+                  % (account.get("emailAddress") or "This account", twin))
+            return False
+        with guard("switch"):
+            if name in profiles():
+                print("\033[31mA profile named %s appeared meanwhile — nothing added.\033[0m" % name)
+                return False
+            keychain_write(profile_service(name), creds)
+            _write_json(profile_config(name), dict(template, oauthAccount=account), indent=2)
+    print("\033[32m%s added (%s).\033[0m It is in the menu now; nothing switched."
+          % (name, account.get("emailAddress") or "?"))
+    return True
+
+
 def add_profile(name):
-    """Save the credentials in use right now as a new profile."""
+    """Save the credentials in use right now as a new profile — for turning the
+    login you already have into your first profile."""
+    check_name(name)
     with guard("switch"):
         if name in profiles():
             raise ValueError("profile %r already exists" % name)
@@ -1245,6 +1378,7 @@ def add_profile(name):
 
 
 def rename_profile(old, new):
+    check_name(new)
     with guard("switch"):
         if old not in profiles():
             raise ValueError("no profile named %r" % old)
@@ -1318,48 +1452,25 @@ def reconnect(name):
     expected, _ = profile_meta(name)
     print("\033[1mReconnecting %s\033[0m%s" % (name, " (%s)" % expected if expected else ""))
     print("Your active account (%s) and running sessions stay put.\n"
-          % (active_profile() or "?"))
-
-    before = claude_credential_services()
-    workdir = tempfile.mkdtemp(prefix="claudini-relogin-")
+          % (active_profile() or "?"), flush=True)
     try:
-        subprocess.run(["claude", "auth", "login"],
-                       env=dict(os.environ, CLAUDE_CONFIG_DIR=workdir))
-
-        created = claude_credential_services() - before
-        if not created:
-            print("\033[31mLogin did not complete: no credentials were created.\033[0m")
-            return
-        creds = keychain_read(sorted(created)[0])
-
-        if not creds or "claudeAiOauth" not in creds:
-            print("\033[31mCredentials unreadable after the login.\033[0m")
-            return
-
-        account = (_read_json(os.path.join(workdir, ".claude.json"), {})
-                   .get("oauthAccount") or {})
-        got = account.get("emailAddress")
-        if expected and got and got != expected:
-            print("\033[33mHeads up: %s expected %s, you logged in as %s.\033[0m"
-                  % (name, expected, got))
-
-        keychain_write(profile_service(name), creds)
-        if account:
-            # claudini reads a profile's identity from this file — without it,
-            # `claudini profile list` would still show the old account.
-            config = _read_json(profile_config(name), {})
-            config["oauthAccount"] = account
-            _write_json(profile_config(name), config, indent=2)
-        print("\033[32m%s reconnected%s.\033[0m" % (name, " (%s)" % got if got else ""))
+        with sandbox_login() as (creds, account):
+            if not creds:
+                print("\033[31mLogin did not complete: no usable credentials.\033[0m")
+                return
+            got = account.get("emailAddress")
+            if expected and got and got != expected:
+                print("\033[33mHeads up: %s expected %s, you logged in as %s.\033[0m"
+                      % (name, expected, got))
+            keychain_write(profile_service(name), creds)
+            if account:
+                # A profile's identity is read from this file — without it the
+                # profile would still show the account it had before.
+                config = _read_json(profile_config(name), {})
+                config["oauthAccount"] = account
+                _write_json(profile_config(name), config, indent=2)
+            print("\033[32m%s reconnected%s.\033[0m" % (name, " (%s)" % got if got else ""))
     finally:
-        # The throwaway config dir gets its own keychain entry holding a real,
-        # working refresh token. Removing it mid-body left it behind on every
-        # path that returned early, and a stranded credential is invisible —
-        # nobody would ever notice. Every entry this login created goes, not
-        # just the first one found.
-        for stray in claude_credential_services() - before:
-            keychain_delete(stray)
-        shutil.rmtree(workdir, ignore_errors=True)
         forget(name)
 
 
@@ -1549,7 +1660,8 @@ ACTIONS = [
     ("--force", "re-read now, skipping the per-account waiting periods"),
     ("--switch NAME", "make that profile the active one"),
     ("--reconnect NAME", "log a profile back in, active account untouched"),
-    ("--add NAME", "save the credentials in use now as a new profile"),
+    ("--add NAME", "log a new account in as a profile, active account untouched"),
+    ("--add-current NAME", "save the login in use now as a profile (your first one)"),
     ("--rename OLD NEW", "rename a profile"),
     ("--remove NAME", "delete a profile (refused while it is in use)"),
     ("--off NAME", "switch an account off: shown, never chosen"),
@@ -1593,9 +1705,15 @@ def main():
         json.dump(actions_json(), sys.stdout)
         return
 
-    if command in ("--add", "--rename", "--remove"):
+    if command == "--add":
         try:
-            if command == "--add":
+            sys.exit(0 if add_account(args[1] if len(args) > 1 else "") else 1)
+        except ValueError as e:
+            sys.exit(str(e))
+
+    if command in ("--add-current", "--rename", "--remove"):
+        try:
+            if command == "--add-current":
                 add_profile(args[1])
             elif command == "--rename":
                 rename_profile(args[1], args[2])
