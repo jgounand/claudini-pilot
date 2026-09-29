@@ -143,6 +143,7 @@ SAMPLES_PER_APPROACH = 3  # readings wanted between "getting close" and the limi
 SUCCESS_TTL = POLL_SEC - 20
 IDENTITY_TTL = 24 * 3600  # an account's org doesn't move: re-read once a day
 THROTTLE_SEC = 180        # after a 429, stop touching the API entirely
+SWITCH_MIN_LIFE_SEC = 1800  # refresh before handing over a token with less left
 
 
 
@@ -1298,6 +1299,18 @@ def switch(name):
             raise SwitchFailed(
                 "the keychain has no readable credentials for %r (service %r) — "
                 "reconnect that account" % (name, profile_service(name)))
+
+        # Hand over a token with life left in it. Claude Code owns the live
+        # slot and refreshes it as it runs, but a session that inherits a token
+        # about to expire has to refresh almost immediately -- and a refresh
+        # that lands wrong is what ends a long agent run with "OAuth token has
+        # expired". Measured on this machine: 2 of 39 switches in a week were
+        # followed by that error within fifteen minutes.
+        ends_at = (target.get("claudeAiOauth") or {}).get("expiresAt", 0) / 1000
+        if ends_at and ends_at - dt.datetime.now().timestamp() < SWITCH_MIN_LIFE_SEC:
+            token, status, _ = refresh(name, profile_service(name), target)
+            if token:
+                target = keychain_read(profile_service(name)) or target
         live = keychain_read(LIVE_SERVICE)
         if current and live:
             keychain_write(profile_service(current), live)
