@@ -662,5 +662,83 @@ class AddingAccounts(unittest.TestCase):
                 cu.check_name(bad)
 
 
+class StrayConfig(unittest.TestCase):
+    """~/.claude.json turned back into a real file must not end switching.
+
+    It used to refuse every switch from then on; now the copy is folded into
+    the profile of its account, kept in backups, and the link comes back.
+    """
+
+    ACCOUNT = {"accountUuid": "A", "organizationUuid": "O", "emailAddress": "a@example.com"}
+    PROFILE = {"firstStartTime": "2026-09-16T14:11:56Z", "numStartups": 32,
+               "hasCompletedOnboarding": True, "mcpServers": {"exa": {}},
+               "projects": {"/code": {"history": ["old"]}, "/other": {}},
+               "oauthAccount": ACCOUNT}
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.saved = {name: getattr(cu, name) for name in
+                      ("PROFILES_DIR", "CLAUDE_JSON", "BACKUPS_DIR")}
+        cu.PROFILES_DIR = os.path.join(self.home, "profiles")
+        cu.CLAUDE_JSON = os.path.join(self.home, "claude.json")
+        cu.BACKUPS_DIR = os.path.join(self.home, "backups")
+        cu._write_json(cu.profile_config("mine"), self.PROFILE)
+        cu._write_json(cu.profile_config("other"), {"oauthAccount": {"accountUuid": "B"}})
+        cu._CONFIG_CACHE.clear()
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(cu, name, value)
+        cu._CONFIG_CACHE.clear()
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def stray(self, config):
+        cu._write_json(cu.CLAUDE_JSON, config)
+
+    def test_a_restarted_config_does_not_overwrite_the_profile(self):
+        self.stray({"firstStartTime": "2026-09-29T15:18:22Z", "numStartups": 2,
+                    "projects": {"/code": {"history": []}, "/new": {}},
+                    "seenNotifications": {"x": 1}, "oauthAccount": self.ACCOUNT})
+        cu._point_at("other")
+        merged = cu._read_json(cu.profile_config("mine"), {})
+        self.assertEqual(merged["numStartups"], 32)
+        self.assertEqual(merged["mcpServers"], {"exa": {}})
+        self.assertEqual(merged["projects"]["/code"], {"history": ["old"]})
+        self.assertIn("/new", merged["projects"])
+        self.assertEqual(merged["seenNotifications"], {"x": 1})
+
+    def test_a_carried_forward_copy_wins(self):
+        self.stray(dict(self.PROFILE, numStartups=33,
+                        projects={"/code": {"history": ["old", "new"]}}))
+        cu._point_at("other")
+        merged = cu._read_json(cu.profile_config("mine"), {})
+        self.assertEqual(merged["numStartups"], 33)
+        self.assertEqual(merged["projects"]["/code"], {"history": ["old", "new"]})
+        self.assertIn("/other", merged["projects"])
+
+    def test_the_link_comes_back_and_the_copy_is_kept(self):
+        self.stray(dict(self.PROFILE, numStartups=33))
+        cu._point_at("other")
+        self.assertTrue(os.path.islink(cu.CLAUDE_JSON))
+        self.assertEqual(os.readlink(cu.CLAUDE_JSON), cu.profile_config("other"))
+        kept = os.listdir(cu.BACKUPS_DIR)
+        self.assertEqual(len(kept), 1)
+        self.assertTrue(kept[0].startswith("claude.json.mine."))
+
+    def test_a_copy_no_profile_claims_is_left_alone(self):
+        self.stray({"oauthAccount": {"accountUuid": "stranger"}})
+        before = open(cu.CLAUDE_JSON).read()
+        with self.assertRaises(RuntimeError):
+            cu._point_at("other")
+        self.assertFalse(os.path.islink(cu.CLAUDE_JSON))
+        self.assertEqual(open(cu.CLAUDE_JSON).read(), before)
+
+    def test_a_link_is_simply_replaced(self):
+        os.symlink(cu.profile_config("mine"), cu.CLAUDE_JSON)
+        cu._point_at("other")
+        self.assertEqual(os.readlink(cu.CLAUDE_JSON), cu.profile_config("other"))
+        self.assertFalse(os.path.exists(cu.BACKUPS_DIR))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

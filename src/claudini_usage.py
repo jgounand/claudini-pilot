@@ -1382,6 +1382,55 @@ def plan_switch(rows, state):
 
 LIVE_SERVICE = "Claude Code-credentials"
 CLAUDE_JSON = os.path.expanduser("~/.claude.json")
+BACKUPS_DIR = os.path.join(CLAUDINI_HOME, "backups")
+
+
+def fold_stray(profile, stray):
+    """One claude.json out of a profile's file and a stray copy of the same account.
+
+    Two ways a copy strays, and they want opposite winners. Claude Code can
+    write the whole config over the link: the copy is the profile carried
+    forward, and it wins. Or a session starts a config from scratch and writes
+    that — seen on 2026-09-29 with 2.1.284, fourteen seconds after a switch:
+    the file in use was back to one startup and 2 projects of the profile's 25.
+    That copy is the poorer one; the profile wins and the
+    copy only adds what the profile lacks. Claude Code stamps firstStartTime
+    once, on a config it creates, so a different stamp tells them apart.
+    """
+    restarted = stray.get("firstStartTime") != profile.get("firstStartTime")
+    base, top = (stray, profile) if restarted else (profile, stray)
+    merged = dict(base, **top)
+    merged["projects"] = dict(base.get("projects") or {}, **(top.get("projects") or {}))
+    return merged
+
+
+def _adopt_stray():
+    """Fold a ~/.claude.json that is a real file again back into its profile.
+
+    Refusing to replace it was safe but a dead end: every switch failed from
+    then on, from the menu and the terminal alike, until someone found the
+    file by hand. The copy is kept in ~/.claudini/backups before anything is
+    merged, and a copy no profile claims is still refused — guessing whose
+    settings it holds would be worse than stopping.
+    """
+    if not os.path.exists(CLAUDE_JSON) or os.path.islink(CLAUDE_JSON):
+        return
+    stray = _read_json(CLAUDE_JSON, None)
+    if not isinstance(stray, dict):
+        raise RuntimeError("%s is a real file and not readable JSON — move it aside "
+                           "and switch again" % CLAUDE_JSON)
+    owner = duplicate_of(stray.get("oauthAccount") or {})
+    if owner is None:
+        raise RuntimeError("%s is a real file for an account no profile holds (%s) — "
+                           "keep it with --add-current NAME, or move it aside"
+                           % (CLAUDE_JSON, (stray.get("oauthAccount") or {})
+                              .get("emailAddress") or "no login"))
+    os.makedirs(BACKUPS_DIR, exist_ok=True)
+    shutil.copy2(CLAUDE_JSON, os.path.join(
+        BACKUPS_DIR, "claude.json.%s.%s" % (owner, dt.datetime.now().strftime("%Y%m%d-%H%M%S"))))
+    _write_json(profile_config(owner),
+                fold_stray(_read_json(profile_config(owner), {}), stray), indent=2)
+    _CONFIG_CACHE.clear()
 
 
 def _point_at(name):
@@ -1392,9 +1441,7 @@ def _point_at(name):
     means a session reading mid-switch sees one file or the other, never a
     half-written one.
     """
-    if os.path.exists(CLAUDE_JSON) and not os.path.islink(CLAUDE_JSON):
-        raise RuntimeError("%s is a real file, not a profile link — refusing to "
-                           "replace it" % CLAUDE_JSON)
+    _adopt_stray()
     staging = "%s.switching.%d" % (CLAUDE_JSON, os.getpid())
     with contextlib.suppress(OSError):
         os.unlink(staging)           # a previous run of *this* pid, or a crash
