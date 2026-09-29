@@ -32,6 +32,15 @@ func updatedAgo(_ date: Date, now: Date = Date()) -> String {
     return "Updated \(seconds / 3600)h ago"
 }
 
+/// "Last read 17:42 · HTTP error 503": a clock time rather than "12m ago", so
+/// it stays true in a widget drawn long after the snapshot was taken.
+func staleNote(_ profile: Profile) -> String? {
+    guard let epoch = profile.stale_since_epoch else { return nil }
+    let at = Date(timeIntervalSince1970: TimeInterval(epoch))
+        .formatted(date: .omitted, time: .shortened)
+    return ["Last read \(at)", profile.stale_why].compactMap { $0 }.joined(separator: " · ")
+}
+
 /// "team · max 20x": the workspace, then the plan.
 func planLine(_ profile: Profile) -> String {
     [profile.space, profile.plan_label].compactMap { $0 }.filter { !$0.isEmpty }

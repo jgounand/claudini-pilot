@@ -280,6 +280,164 @@ class Retrying(unittest.TestCase):
         self.assertTrue(cu.needs_login(account("a", status=cu.NEEDS_LOGIN)))
 
 
+class Collecting(unittest.TestCase):
+    """collect() against a scripted fetch: which accounts get asked, and what
+    is shown when asking fails."""
+
+    NAMES = ["busy", "idle", "other"]
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.saved = {name: getattr(cu, name) for name in
+                      ("CLAUDINI_HOME", "PROFILES_DIR", "CACHE_FILE", "STATE_FILE",
+                       "HISTORY_FILE", "profiles", "active_profile", "fetch")}
+        cu.CLAUDINI_HOME = self.home
+        cu.PROFILES_DIR = os.path.join(self.home, "profiles")
+        cu.CACHE_FILE = os.path.join(self.home, "cache.json")
+        cu.STATE_FILE = os.path.join(self.home, "auto.json")
+        cu.HISTORY_FILE = os.path.join(self.home, "history.jsonl")
+        cu.profiles = lambda: self.NAMES
+        cu.active_profile = lambda: "busy"
+        self.answers, self.asked = {}, []
+        cu.fetch = self.fake_fetch
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(cu, name, value)
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def fake_fetch(self, name, is_active, identity=None):
+        self.asked.append(name)
+        row = dict(self.answers.get(name) or account(name), active=is_active)
+        return row, None
+
+    def age(self, seconds):
+        """Pretend every cache entry was written `seconds` earlier."""
+        cache = cu.load_cache()
+        for entry in cache["profiles"].values():
+            entry["at"] -= seconds
+            if entry.get("good"):
+                entry["good"]["at"] -= seconds
+        cu.save_cache(cache)
+
+    def limited(self, name, wait=None):
+        return dict(account(name, status=cu.RATE_LIMITED), retry_after=wait, transient=True)
+
+    def down(self, name):
+        return dict(account(name, status=cu.UNREACHABLE), transient=True)
+
+    def test_one_accounts_429_does_not_silence_the_others(self):
+        cu.collect()
+        self.answers["other"] = self.limited("other", wait=1800)
+        self.age(cu.SUCCESS_TTL + 1)
+        cu.collect()
+        self.assertEqual(cu.throttled_for(), 0)
+
+        self.asked.clear()
+        self.age(cu.SUCCESS_TTL + 1)
+        cu.collect(force=True)
+        self.assertIn("idle", self.asked)
+        self.assertNotIn("other", self.asked, "Retry-After was not honoured")
+
+    def test_429s_from_two_accounts_in_separate_passes_are_a_burst(self):
+        cu.collect()
+        self.answers["other"] = self.limited("other", wait=1800)
+        self.age(cu.SUCCESS_TTL + 1)
+        cu.collect()
+        self.assertEqual(cu.throttled_for(), 0)
+        self.answers["idle"] = self.limited("idle", wait=1800)
+        self.age(cu.SUCCESS_TTL + 1)                   # still inside BURST_SEC
+        cu.collect()
+        self.assertGreater(cu.throttled_for(), 0)
+
+    def test_the_rate_follows_each_accounts_own_reading_time(self):
+        now = NOW.timestamp()
+        with open(cu.HISTORY_FILE, "w") as f:
+            # Sampled five minutes apart, but the second sample repeated a
+            # reading taken four minutes before it: 10 points in one minute.
+            for sampled, read, used in ((600, 600, 40), (300, 540, 50)):
+                f.write(json.dumps({"at": now - sampled, "usage": {
+                    "busy": {"session": used, "at": now - read}}}) + "\n")
+        self.assertAlmostEqual(cu.burn_rate("busy", as_of=now), 10.0)
+
+    def test_a_burst_of_429s_still_pauses_everything(self):
+        for name in self.NAMES:
+            self.answers[name] = self.limited(name)
+        cu.collect()
+        self.assertGreater(cu.throttled_for(), 0)
+
+    def test_a_failed_read_keeps_the_last_good_numbers(self):
+        self.answers["idle"] = account("idle", session=40, weekly=60)
+        cu.collect()
+        self.answers["idle"] = self.down("idle")
+        self.age(cu.SUCCESS_TTL + 1)
+        rows = {r["name"]: r for r in cu.collect()}
+        self.assertEqual(rows["idle"]["status"], cu.OK)
+        self.assertEqual(cu.worst_general(rows["idle"]), 60)
+        self.assertGreater(rows["idle"]["stale_sec"], 0)
+
+        # Still there when served from the cache during the backoff.
+        rows = {r["name"]: r for r in cu.collect()}
+        self.assertEqual(cu.worst_general(rows["idle"]), 60)
+
+    def test_a_forced_refresh_does_not_knock_on_a_rate_limit(self):
+        cu.collect()
+        self.answers["other"] = self.limited("other")          # no Retry-After
+        self.age(cu.SUCCESS_TTL + 1)
+        cu.collect()
+        self.asked.clear()
+        cu.collect(force=True)
+        self.assertIn("idle", self.asked)
+        self.assertNotIn("other", self.asked)
+
+    def test_a_refresh_failure_is_not_papered_over(self):
+        cu.collect()
+        self.answers["idle"] = account("idle", status=cu.UNREACHABLE)   # not transient
+        self.age(cu.SUCCESS_TTL + 1)
+        rows = {r["name"]: r for r in cu.collect()}
+        self.assertEqual(rows["idle"]["status"], cu.UNREACHABLE)
+
+    def test_a_stale_window_that_has_reset_reads_empty_and_undated(self):
+        good = account("idle", session=20, weekly=97)
+        good["limits"][1]["resets_at"] = when(minutes=-5)
+        now = NOW.timestamp()
+        entry = {"at": now, "fails": 1, "row": self.down("idle"),
+                 "good": {"at": now - 600, "row": good}}
+        row = cu.shown(entry, now, False)
+        self.assertEqual(cu.worst_general(row), 20)
+        self.assertIsNone(cu.weekly_reset(row), "would rank first for resetting 'now'")
+
+    def test_a_429_without_headers_does_not_crash(self):
+        import urllib.error
+        self.assertIsNone(cu.retry_after(urllib.error.HTTPError("u", 429, "m", None, None)))
+
+    def test_the_active_account_is_assumed_to_keep_burning(self):
+        now = NOW.timestamp()
+        with open(cu.HISTORY_FILE, "w") as f:           # 2 points a minute
+            for minutes_ago, used in ((20, 40), (10, 60)):
+                f.write(json.dumps({"at": now - minutes_ago * 60,
+                                    "usage": {"busy": {"session": used}}}) + "\n")
+        entry = {"at": now, "fails": 1, "row": self.down("busy"),
+                 "good": {"at": now - 600, "row": account("busy", session=60, active=True)}}
+        self.assertEqual(cu.worst_general(cu.shown(entry, now, True)), 80)
+        # Still climbing an hour on, once that half hour is long past.
+        self.assertEqual(cu.worst_general(cu.shown(entry, now + 3000, True)), 100)
+        # Only the account in use now climbs.
+        self.assertEqual(cu.worst_general(cu.shown(entry, now, False)), 60)
+
+    def test_a_login_problem_is_not_papered_over(self):
+        now = NOW.timestamp()
+        entry = {"at": now, "fails": 1, "row": account("idle", status=cu.NEEDS_LOGIN),
+                 "good": {"at": now - 600, "row": account("idle")}}
+        self.assertEqual(cu.shown(entry, now, False)["status"], cu.NEEDS_LOGIN)
+
+    def test_a_burning_active_account_is_reread_sooner(self):
+        entry = {"at": 0, "fails": 0, "row": account("busy", session=90, active=True)}
+        ttl = cu.active_ttl(entry, state(max_usage=95))
+        self.assertLess(ttl, cu.SUCCESS_TTL)
+        self.assertGreaterEqual(ttl, cu.ACTIVE_FLOOR_SEC)
+
+
 class Reporting(unittest.TestCase):
     def test_detail_is_preferred_over_the_token(self):
         row = account("a", status=cu.UNREACHABLE)

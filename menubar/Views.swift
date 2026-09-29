@@ -224,9 +224,11 @@ final class SectionView: MenuRow {
 /// One limit as Claude draws it: title left, "18% · resets 5d" right, bar below.
 final class LimitView: MenuRow {
     let limit: Limit
+    let muted: Bool
 
-    init(_ limit: Limit) {
+    init(_ limit: Limit, muted: Bool = false) {
         self.limit = limit
+        self.muted = muted
         super.init(height: 48)
     }
 
@@ -234,10 +236,11 @@ final class LimitView: MenuRow {
 
     override func draw(_ dirtyRect: NSRect) {
         let value = usage(limit.percent, resets: limit.resets_at_epoch)
-        let valueStart = right(value, .systemFont(ofSize: 13), .secondaryLabelColor, y: 4)
+        let valueStart = right(value, .systemFont(ofSize: 13),
+                               muted ? .tertiaryLabelColor : .secondaryLabelColor, y: 4)
         left(limit.title, .systemFont(ofSize: 13), .labelColor, y: 4,
              width: valueStart - inset - 8)
-        bar(percent: limit.percent, level: limit.level, y: 27, height: 8)
+        bar(percent: limit.percent, level: limit.level, y: 27, height: 8, muted: muted)
     }
 }
 
@@ -253,9 +256,12 @@ final class AccountTitleView: MenuRow {
     required init?(coder: NSCoder) { fatalError("not used") }
 
     override func draw(_ dirtyRect: NSRect) {
-        let plan = profile.disabled ? "switched off" : planLine(profile)
+        // Not current any more: say since when, where the plan usually sits.
+        let note = staleNote(profile)
+        let plan = profile.disabled ? "switched off" : note ?? planLine(profile)
         let planStart = right(plan, .systemFont(ofSize: 12),
-                              profile.disabled ? .systemOrange : .secondaryLabelColor,
+                              profile.disabled || note != nil ? .systemOrange
+                                                              : .secondaryLabelColor,
                               y: 5, end: lineEnd)
         left(profile.name, .systemFont(ofSize: 14, weight: .semibold), .labelColor, y: 4,
              width: planStart - inset - 8)
@@ -327,12 +333,13 @@ final class AccountRowView: MenuRow {
         // Switched off, the row stays readable but steps back: its figures
         // still help you decide when to switch it on again.
         let off = profile.disabled
+        let note = staleNote(profile)
         var valueStart = lineEnd
         if let binding = profile.binding {
             valueStart = right(usage(binding.percent, resets: binding.resets_at_epoch,
                                      label: binding.label),
                                .systemFont(ofSize: 12),
-                               off ? .tertiaryLabelColor : .secondaryLabelColor,
+                               profile.dimmed ? .tertiaryLabelColor : .secondaryLabelColor,
                                y: 6, end: lineEnd)
         }
 
@@ -342,16 +349,17 @@ final class AccountRowView: MenuRow {
         let nameWidth = min(name.size().width, valueStart - inset - 8)
         left(profile.name, .systemFont(ofSize: 13, weight: .medium), nameColour, y: 5,
              width: nameWidth)
-        let plan = planLine(profile)
+        let plan = note ?? planLine(profile)
         let planX = inset + nameWidth + 8
         if !plan.isEmpty, valueStart - planX > 30 {
-            string(plan, .systemFont(ofSize: 11), .tertiaryLabelColor)
+            string(plan, .systemFont(ofSize: 11), note != nil ? .systemOrange : .tertiaryLabelColor)
                 .draw(with: NSRect(x: planX, y: 7, width: valueStart - planX - 8, height: 16),
                       options: [.usesLineFragmentOrigin, .truncatesLastVisibleLine])
         }
 
         if let binding = profile.binding {
-            bar(percent: binding.percent, level: binding.level, y: 29, height: 5, muted: off)
+            bar(percent: binding.percent, level: binding.level, y: 29, height: 5,
+                muted: profile.dimmed)
         } else {
             let hint = profile.needs_login ? profile.detail + " — click to log in" : profile.detail
             left(hint, .systemFont(ofSize: 11), .systemRed, y: 26)

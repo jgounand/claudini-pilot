@@ -147,6 +147,8 @@ struct AccountHeading: View {
                     Text("Switched off").foregroundStyle(.orange)
                 } else if profile.status != "ok" {
                     Text(profile.detail).foregroundStyle(.red)
+                } else if let note = staleNote(profile) {
+                    Text(note).foregroundStyle(.orange)
                 } else {
                     Text(planLine(profile)).foregroundStyle(.secondary)
                 }
@@ -271,7 +273,7 @@ struct SmallWidget: View {
                 if let binding = account.binding {
                     HStack(spacing: 10) {
                         UsageRing(percent: binding.percent, level: binding.level,
-                                  muted: account.disabled)
+                                  muted: account.dimmed)
                             .frame(width: 58, height: 58)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(binding.label == "5h" ? "5-hour" : "Weekly")
@@ -308,7 +310,7 @@ struct MediumWidget: View {
                         AccountHeading(profile: account)
                         if let binding = account.binding {
                             UsageRing(percent: binding.percent, level: binding.level,
-                                      muted: account.disabled)
+                                      muted: account.dimmed)
                                 .frame(width: 62, height: 62)
                         }
                     }
@@ -327,7 +329,7 @@ struct MediumWidget: View {
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         ForEach(Array(account.limits.prefix(3).enumerated()), id: \.offset) { _, limit in
-                            LimitRow(limit: limit, now: board.now, muted: account.disabled)
+                            LimitRow(limit: limit, now: board.now, muted: account.dimmed)
                         }
                     }
                 }
@@ -378,7 +380,7 @@ struct LargeWidget: View {
                 }
                 VStack(spacing: 6) {
                     ForEach(Array(account.limits.prefix(3).enumerated()), id: \.offset) { _, limit in
-                        LimitRow(limit: limit, now: board.now, muted: account.disabled)
+                        LimitRow(limit: limit, now: board.now, muted: account.dimmed)
                     }
                 }
                 .padding(.top, 5)
@@ -420,7 +422,7 @@ struct OtherAccountRow: View {
                     if let binding = profile.binding {
                         Text(usage(binding.percent, resets: binding.resets_at_epoch,
                                    label: binding.label, now: now))
-                            .foregroundStyle(profile.disabled ? .tertiary : .secondary)
+                            .foregroundStyle(profile.dimmed ? .tertiary : .secondary)
                     } else {
                         Text(profile.detail).foregroundStyle(.red)
                     }
@@ -432,7 +434,7 @@ struct OtherAccountRow: View {
             }
             if let binding = profile.binding {
                 Gauge(percent: binding.percent, level: binding.level, height: 3,
-                      muted: profile.disabled)
+                      muted: profile.dimmed)
             }
         }
     }

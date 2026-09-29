@@ -142,7 +142,11 @@ POLL_FLOOR_SEC = 25       # the fastest we ever ask an interface to come back
 SAMPLES_PER_APPROACH = 3  # readings wanted between "getting close" and the limit
 SUCCESS_TTL = POLL_SEC - 20
 IDENTITY_TTL = 24 * 3600  # an account's org doesn't move: re-read once a day
-THROTTLE_SEC = 180        # after a 429, stop touching the API entirely
+THROTTLE_SEC = 180        # after a burst of 429s, stop touching the API entirely
+RETRY_AFTER_MAX_SEC = 3600  # the longest Retry-After we honour for one account
+BURST_SEC = 5 * 60        # 429s from two accounts this close are a burst
+ACTIVE_FLOOR_SEC = 60     # the active account is read off the API: never faster
+STALE_MAX_SEC = 6 * 3600  # how long a good reading stands in for failed ones
 SWITCH_MIN_LIFE_SEC = 1800  # refresh before handing over a token with less left
 
 
@@ -179,7 +183,10 @@ def status_text(row):
 # two-second outage.
 RETRY = {
     UNREACHABLE: (20, 5 * 60),
-    RATE_LIMITED: (THROTTLE_SEC, THROTTLE_SEC),
+    # Used only when the 429 carries no Retry-After. The limit is per account
+    # and has been seen to last half an hour; knocking every three minutes
+    # only keeps it closed.
+    RATE_LIMITED: (THROTTLE_SEC, 30 * 60),
     NEEDS_LOGIN: (15 * 60, 6 * 3600),
     # Observed to clear on its own within the hour, so this is not the
     # permanent org policy its wording suggests. Backing off for hours would
@@ -187,6 +194,7 @@ RETRY = {
     BLOCKED: (5 * 60, 60 * 60),
 }
 DEFAULT_RETRY = (15 * 60, 6 * 3600)
+
 
 # Two ways to be optimal, because there are two different goals.
 #   model      — protect the preferred model's weekly quota above all else.
@@ -296,7 +304,8 @@ def load_cache():
         data = {}
     return {"profiles": data.get("profiles", {}),
             "identity": data.get("identity", {}),
-            "throttled_until": data.get("throttled_until", 0)}
+            "throttled_until": data.get("throttled_until", 0),
+            "limited": data.get("limited", {})}
 
 
 def save_cache(cache):
@@ -332,6 +341,8 @@ def merge_cache(mine):
             if not known or entry["at"] >= known["at"]:
                 disk["identity"][name] = entry
         disk["throttled_until"] = max(disk["throttled_until"], mine["throttled_until"])
+        for name, at in mine["limited"].items():
+            disk["limited"][name] = max(at, disk["limited"].get(name, 0))
 
 
 HISTORY_FILE = os.path.join(CLAUDINI_HOME, "history.jsonl")
@@ -392,11 +403,22 @@ def last_sample_at():
 
 def record_usage(rows):
     """Sample what every account looks like, at most every HISTORY_GAP."""
-    fresh = [r for r in rows if r["status"] == OK and r["limits"]]
+    # A stale row repeats an old reading under a new timestamp, which would
+    # read as a flat stretch and pull the measured burn rate down.
+    fresh = [r for r in rows
+             if r["status"] == OK and r["limits"] and r.get("stale_sec") is None]
     if not fresh or dt.datetime.now().timestamp() - last_sample_at() < HISTORY_GAP:
         return
-    record({"usage": {r["name"]: {l["kind"]: l["percent"] for l in r["limits"]}
-                      for r in fresh},
+    # Each account carries the time it was read: a row served from the cache
+    # is up to SUCCESS_TTL old, and stamping it with the sample's time would
+    # draw the same flat stretch.
+    def sample(r):
+        point = {l["kind"]: l["percent"] for l in r["limits"]}
+        if r.get("read_at"):
+            point["at"] = int(r["read_at"])
+        return point
+
+    record({"usage": {r["name"]: sample(r) for r in fresh},
             "active": (active_row(rows) or {}).get("name")})
 
 
@@ -646,6 +668,8 @@ def fetch_identity(token):
 # trustworthy for the *active* profile: switching copies the running session's
 # file into the outgoing profile, so an idle profile's copy usually belongs to
 # whichever account was live at the time. The account uuid is checked anyway.
+# Claude Code stopped writing it at some point (absent on 2026-09-29), so in
+# practice the active account is read from the API, on active_ttl().
 LOCAL_USAGE_TTL = 10 * 60
 
 
@@ -703,6 +727,23 @@ def _failed(out, status, detail=None):
     return out, None
 
 
+def retry_after(error):
+    """The seconds a 429 asked us to wait, or None when it did not say."""
+    try:
+        return min(RETRY_AFTER_MAX_SEC, max(0, int(error.headers.get("Retry-After"))))
+    except (AttributeError, TypeError, ValueError):     # headers can be None
+        return None
+
+
+def _passing(out, status, detail):
+    """A failure of the usage endpoint alone, with a token we hold as good: it
+    says nothing about the account, so its last good reading still stands
+    (see shown). Refresh failures are not this — the account behind them may
+    well be unusable, and a stale row would make it a switch target."""
+    out["transient"] = True
+    return _failed(out, status, detail)
+
+
 def fetch(name, is_active, identity=None):
     """Read one profile's usage. Returns (row, fresh identity or None).
 
@@ -737,7 +778,8 @@ def fetch(name, is_active, identity=None):
             break
         except urllib.error.HTTPError as e:
             if e.code == 429:
-                return _failed(out, RATE_LIMITED, "the API is rate limiting us")
+                out["retry_after"] = retry_after(e)
+                return _passing(out, RATE_LIMITED, "the API is rate limiting us")
             body = (e.read() or b"").decode("utf8", "replace")[:400]
             # A permission error is the organisation refusing OAuth, not a bad
             # token — refreshing or logging in again cannot fix it.
@@ -750,9 +792,11 @@ def fetch(name, is_active, identity=None):
                 continue                     # stale token: refresh and retry
             if e.code in (401, 403):
                 return _failed(out, NEEDS_LOGIN, "credentials rejected by the API")
+            if e.code >= 500:
+                return _passing(out, UNREACHABLE, "HTTP error %d" % e.code)
             return _failed(out, UNREACHABLE, "HTTP error %d" % e.code)
         except Exception as e:
-            return _failed(out, UNREACHABLE, "unreachable (%s)" % type(e).__name__)
+            return _passing(out, UNREACHABLE, "unreachable (%s)" % type(e).__name__)
 
     fresh_identity = None
     if identity is None:
@@ -769,28 +813,92 @@ def fail_delay(failures, status=None):
     return min(first * 2 ** max(0, failures - 1), ceiling)
 
 
+def last_good(entry):
+    """The most recent successful reading a cache entry still remembers."""
+    if not entry:
+        return None
+    if entry["row"]["status"] == OK:
+        return {"at": entry["at"], "row": entry["row"]}
+    return entry.get("good")
+
+
+def shown(entry, now, active):
+    """What a cache entry says about its account right now.
+
+    A 503 or a 429 says nothing about the account, so it does not erase what
+    we knew: the last good reading stands in, marked stale. Replacing it with
+    an empty error row meant one bad pass left auto-switching with nothing to
+    switch to — or switching away from an account only because it could not
+    be read.
+
+    A window that has reset since that reading is shown empty and without a
+    reset date: the old date is in the past, and endurance mode would rank the
+    account first for "resetting now". The account you are working on keeps
+    climbing while it cannot be read, so its numbers are pushed forward by the
+    burn measured up to that reading — since the reset, for a window that
+    reset. Guessing high switches a little early, guessing low runs it dry.
+    `active` is whether it is the account in use now, not when it was read.
+    """
+    row, good = entry["row"], entry.get("good")
+    if (row["status"] == OK or not row.get("transient") or not good
+            or now - good["at"] > STALE_MAX_SEC):
+        return dict(row, active=active, read_at=entry["at"])
+
+    def aged(l):
+        reset = epoch_of(l["resets_at"])
+        since = good["at"]
+        if reset is not None and reset < now:
+            l, since = dict(l, percent=0, resets_at=None), max(since, reset)
+        if active and l["kind"] in GENERAL_KINDS:
+            climbed = burn_rate(row["name"], l["kind"], as_of=good["at"]) * (now - since) / 60
+            l = dict(l, percent=min(100, int(l["percent"] + climbed)))
+        return l
+
+    return dict(good["row"], limits=[aged(l) for l in good["row"]["limits"]],
+                active=active, read_at=good["at"], stale_sec=int(now - good["at"]),
+                stale_why=status_text(row))
+
+
+def active_ttl(entry, state):
+    """How long the active account's reading stays good enough.
+
+    It follows the burn, like the interfaces' poll period does — a reading
+    five minutes old is a blindfold on an account climbing ten points a minute
+    — but each read is an API call on the account you are working on, and a
+    429 there costs far more than a slightly older number, hence the floor.
+    """
+    good = last_good(entry)
+    if not good:
+        return SUCCESS_TTL
+    wanted = poll_delay([dict(good["row"], active=True)], state) - 5
+    return max(ACTIVE_FLOOR_SEC, min(SUCCESS_TTL, wanted))
+
+
 def collect(force=False):
     """Every profile's usage, hitting the API as little as possible.
 
-    `force` is a person asking for it now: it skips the per-account waiting
-    periods so a account that failed while the network was down comes back
-    immediately rather than at the end of its backoff. The 429 guard still
-    applies — asking harder does not make the API answer.
+    `force` is a person asking for it now: an account that failed while the
+    network was down comes back immediately rather than at the end of its
+    backoff.
 
-    A good read is served for SUCCESS_TTL, a broken one for a delay that widens
-    with each consecutive failure, and after a 429 the API isn't called at all
-    until the guard expires. The cache is read and written here and nowhere
-    else: the parallel reads never touch the file.
+    A good read is served for SUCCESS_TTL (the active account's for less, see
+    active_ttl), a broken one for as long as a 429's Retry-After asked or else
+    a delay that widens with each consecutive failure. `force` skips those
+    delays, except a rate limit's: asking harder does not make the API answer. The rate limit is per
+    account, so one account's 429 backs off that account alone; only a burst
+    of them from different accounts stops the API for everyone. The cache is read and
+    written here and nowhere else: the parallel reads never touch the file.
     """
     act = active_profile()
     cache = load_cache()
     entries, identities = cache["profiles"], cache["identity"]
     now = dt.datetime.now().timestamp()
     muted = now < cache["throttled_until"]
-    hit_limit = threading.Event()
+    limited = []
+    fresh_for_active = active_ttl(entries.get(act), load_state())
 
     def served(entry, name):
-        return dict(entry["row"], cached=True, active=(name == act))
+        return dict(shown(entry, now, name == act), cached=True)
 
     def one(name):
         entry = entries.get(name)
@@ -807,35 +915,51 @@ def collect(force=False):
                 row = parse_usage(dict(base_row(name, True), source="local"), local)
                 row.update(identity)
                 entries[name] = {"at": now, "row": row, "fails": 0}
-                return row
+                return shown(entries[name], now, True)
 
         if muted:
             return (served(entry, name) if entry else
                     base_row(name, name == act, RATE_LIMITED, "paused after a 429"))
-        if entry and not force:
-            ok = entry["row"]["status"] == OK
-            age_limit = (SUCCESS_TTL if ok
-                         else fail_delay(entry.get("fails", 1), entry["row"]["status"]))
-            if now - entry["at"] < age_limit:
+        if entry:
+            status = entry["row"]["status"]
+            if status == OK:
+                age_limit = fresh_for_active if name == act else SUCCESS_TTL
+            else:
+                age_limit = (entry.get("wait")
+                             or fail_delay(entry.get("fails", 1), status))
+            # Asking harder does not lift a rate limit either.
+            if ((not force or status == RATE_LIMITED)
+                    and now - entry["at"] < age_limit):
                 return served(entry, name)
 
         row, fresh = fetch(name, name == act, identity)
         failures = 0 if row["status"] == OK else (entry or {}).get("fails", 0) + 1
-        entries[name] = {"at": now, "row": row, "fails": failures}
+        new = {"at": now, "row": row, "fails": failures}
+        if row.get("retry_after"):
+            new["wait"] = row["retry_after"]
+        if row.get("transient") and last_good(entry):
+            new["good"] = last_good(entry)
+        entries[name] = new
         if fresh:
             identities[name] = {"at": now, "info": fresh}
-        if row["status"] == RATE_LIMITED:
-            hit_limit.set()
-        return row
+        if row["status"] == RATE_LIMITED and row.get("transient"):
+            limited.append(name)             # the usage API's, not a refresh's
+        return shown(new, now, name == act)
 
     # Two requests in flight is enough: the wall-clock gain of going wider is
     # under a second, and burstiness is what trips the limiter.
     with concurrent.futures.ThreadPoolExecutor(max_workers=2) as pool:
         rows = list(pool.map(one, profiles()))
 
-    # Only a real 429 re-arms the guard: a row served from cache during the
-    # pause would extend it forever.
-    if hit_limit.is_set():
+    # Only real 429s re-arm the guard — a row served from cache during the
+    # pause would extend it forever — and only from two accounts or more
+    # within BURST_SEC: one account sitting out its own limit re-armed it on
+    # every retry and kept all the others from being read. Passes are counted
+    # together because staggered backoffs rarely put two accounts in one.
+    recent = {n: at for n, at in cache["limited"].items() if now - at < BURST_SEC}
+    recent.update((name, now) for name in limited)
+    cache["limited"] = recent
+    if limited and len(recent) >= 2:
         cache["throttled_until"] = now + THROTTLE_SEC
     merge_cache(cache)
     record_usage(rows)
@@ -1001,35 +1125,54 @@ def _by_endurance(usable):
                                          -(general_headroom(p) or 0)))
 
 
-def burn_rate(name, metric="session"):
+_TAIL = {}
+
+
+def history_tail():
+    """(at, usage) for the samples at the end of the history, parsed once per
+    change of the file: a pass asks for rates several times, and re-reading
+    200 kB of JSON for each was most of what it cost."""
+    try:
+        stat = os.stat(HISTORY_FILE)
+    except OSError:
+        return []
+    key = (HISTORY_FILE, stat.st_size, stat.st_mtime_ns)
+    if _TAIL.get("key") != key:
+        with open(HISTORY_FILE, "rb") as fh:                  # the tail is enough
+            start = max(0, stat.st_size - 200_000)
+            fh.seek(start)
+            lines = fh.read().split(b"\n")[1 if start else 0:]   # drop a cut line
+        samples = []
+        for line in lines:
+            if b'"usage"' not in line:
+                continue
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if row.get("usage") and row.get("at"):
+                samples.append((row["at"], row["usage"]))
+        _TAIL.update(key=key, samples=samples)
+    return _TAIL["samples"]
+
+
+def burn_rate(name, metric="session", as_of=None):
     """Points of usage per minute for `name`, from the readings on disk.
+
+    `as_of` measures the half hour before that moment instead of before now —
+    an account that has not been readable since has no newer readings, and
+    measured from now its rate would decay to nothing while it keeps burning.
 
     Measured rather than assumed: a 5x plan climbs several points a minute and
     a quiet account climbs none, and the difference decides whether a poll
     period is a safety margin or a blindfold.
     """
-    try:
-        with open(HISTORY_FILE, "rb") as fh:                  # the tail is enough
-            fh.seek(0, os.SEEK_END)
-            fh.seek(max(0, fh.tell() - 200_000))
-            lines = fh.read().split(b"\n")[1:]
-    except OSError:
-        return 0.0
+    seen = sorted({(point.get("at") or at, point.get(metric, 0))
+                   for at, usage in history_tail()
+                   for point in [usage.get(name)] if point})
 
-    seen = []
-    for line in lines:
-        if b'"usage"' not in line:
-            continue
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        point = (row.get("usage") or {}).get(name)
-        if point and row.get("at"):
-            seen.append((row["at"], point.get(metric, 0)))
-
-    now = dt.datetime.now().timestamp()
-    seen = [s for s in seen if now - s[0] < 1800][-6:]   # the last half hour
+    now = as_of or dt.datetime.now().timestamp()
+    seen = [s for s in seen if 0 <= now - s[0] < 1800][-6:]   # the last half hour
     if len(seen) < 2:
         return 0.0
     rates = [(b[1] - a[1]) / ((b[0] - a[0]) / 60.0)
@@ -1046,10 +1189,10 @@ def poll_delay(rows, state):
     from comfortable to spent without ever being seen near the threshold, and
     the switch that should have happened never does.
 
-    Polling the active account costs nothing -- Claude Code writes its usage to
-    disk and that is where it is read -- so the period follows how fast it is
-    burning rather than a fixed clock. The other accounts keep their own
-    freshness window and are not refetched by this.
+    So the period follows how fast the active account is burning rather than
+    a fixed clock. Its reading is refetched on the same rhythm but never more
+    often than ACTIVE_FLOOR_SEC (see active_ttl); the other accounts keep
+    their own freshness window and are not refetched by this.
     """
     active = active_row(rows)
     if not active or active.get("status") != OK:
@@ -1595,6 +1738,11 @@ def seconds_until(iso):
     return seconds_until_epoch(epoch_of(iso))
 
 
+def ago(seconds):
+    """How long ago, written short."""
+    return "just now" if seconds < 60 else until(seconds) + " ago"
+
+
 def until(seconds):
     """A delay in seconds, written short."""
     if seconds is None:
@@ -1647,6 +1795,8 @@ def render(rows, plan=None):
             head += "  \033[2m· read from disk\033[0m\033[1m"
         print("\033[1m%s\033[0m" % head)
 
+        if r.get("stale_sec") is not None:
+            print("    \033[2mlast read %s · %s\033[0m" % (ago(r["stale_sec"]), r["stale_why"]))
         if r["status"] != OK:
             print("    %s" % status_text(r))
         for lim in r["limits"]:
@@ -1711,6 +1861,12 @@ def for_json(rows, state, plan=None):
             "status": r["status"],
             "detail": status_text(r),
             "source": r.get("source"),
+            # Set when the latest read failed and an older good one stands
+            # in: when that one was taken (a clock time, so a widget drawn
+            # later still says the truth) and what went wrong since.
+            "stale_since_epoch": (int(r["read_at"]) if r.get("stale_sec") is not None
+                                  else None),
+            "stale_why": r.get("stale_why"),
             "space": r.get("space"),
             "plan_label": plan_label(r),
             "limit_reset": r.get("limit_reset"),

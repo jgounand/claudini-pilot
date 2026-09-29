@@ -54,7 +54,8 @@ def chart(samples, kind, colours):
 
     ends = []
     for name, shade in colours.items():
-        points = [(x(s["at"]), y(s["usage"][name][kind]))
+        # An account's own reading time when the sample carries one.
+        points = [(x(s["usage"][name].get("at") or s["at"]), y(s["usage"][name][kind]))
                   for s in samples if kind in s["usage"].get(name, {})]
         if not points:
             continue

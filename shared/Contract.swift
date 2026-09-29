@@ -35,6 +35,13 @@ struct Profile: Decodable {
     let plan_label: String?
     let binding: Binding?
     let saturated: [String]
+    /// Set when the latest read failed and an older good reading stands in:
+    /// when that one was taken, and what went wrong since.
+    let stale_since_epoch: Int?
+    let stale_why: String?
+
+    /// Figures to show a step back: switched off, or no longer current.
+    var dimmed: Bool { disabled || stale_since_epoch != nil }
 }
 
 /// The general window that will stop you first — which one it is changes

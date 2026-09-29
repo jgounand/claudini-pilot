@@ -212,6 +212,9 @@ class Console:
             self.put(scr, y, COL["session"], note, curses.color_pair(3))
             return
 
+        # Standing in for a read that failed: dimmed and marked "~", so an old
+        # or projected number is never mistaken for a fresh one.
+        stale = p.get("stale_sec") is not None
         preferred = cu.preferred_limit(p)
         for limit in p["limits"]:
             column = COL_LIMITS.get(limit["kind"])
@@ -219,8 +222,9 @@ class Console:
                 if limit is not preferred:
                     continue
                 column = COL[cu.PREFERRED_MODEL]
-            self.put(scr, y, column, "%3d%%" % limit["percent"],
-                     curses.color_pair(COLORS[cu.level(limit["percent"])]))
+            self.put(scr, y, column, ("~%2d%%" if stale else "%3d%%") % limit["percent"],
+                     curses.A_DIM if stale
+                     else curses.color_pair(COLORS[cu.level(limit["percent"])]))
 
         # The reset shown is the one for the window that actually binds, so it
         # agrees with the percentage the eye lands on first.

@@ -150,7 +150,7 @@ final class Bar: NSObject, NSMenuDelegate {
             if active.limits.isEmpty {
                 menu.addItem(row(StatusView(active)))
             } else {
-                active.limits.forEach { menu.addItem(row(LimitView($0))) }
+                active.limits.forEach { menu.addItem(row(LimitView($0, muted: active.dimmed))) }
             }
             menu.addItem(.separator())
         }
