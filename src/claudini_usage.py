@@ -137,7 +137,9 @@ SEAT_LABELS = {"standard": "std", "premium": "prem"}
 # refetches, while a second interface polling out of phase lands inside the
 # window and pays nothing. Set the TTL above P instead and nothing ever
 # refetches at all; set it far below and the cache stops mattering.
-POLL_SEC = 300            # what the interfaces are expected to poll at
+POLL_SEC = 300            # the resting period, when nothing is close to its limit
+POLL_FLOOR_SEC = 25       # the fastest we ever ask an interface to come back
+SAMPLES_PER_APPROACH = 3  # readings wanted between "getting close" and the limit
 SUCCESS_TTL = POLL_SEC - 20
 IDENTITY_TTL = 24 * 3600  # an account's org doesn't move: re-read once a day
 THROTTLE_SEC = 180        # after a 429, stop touching the API entirely
@@ -998,6 +1000,75 @@ def _by_endurance(usable):
                                          -(general_headroom(p) or 0)))
 
 
+def burn_rate(name, metric="session"):
+    """Points of usage per minute for `name`, from the readings on disk.
+
+    Measured rather than assumed: a 5x plan climbs several points a minute and
+    a quiet account climbs none, and the difference decides whether a poll
+    period is a safety margin or a blindfold.
+    """
+    try:
+        with open(HISTORY_FILE, "rb") as fh:                  # the tail is enough
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 200_000))
+            lines = fh.read().split(b"\n")[1:]
+    except OSError:
+        return 0.0
+
+    seen = []
+    for line in lines:
+        if b'"usage"' not in line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        point = (row.get("usage") or {}).get(name)
+        if point and row.get("at"):
+            seen.append((row["at"], point.get(metric, 0)))
+
+    now = dt.datetime.now().timestamp()
+    seen = [s for s in seen if now - s[0] < 1800][-6:]   # the last half hour
+    if len(seen) < 2:
+        return 0.0
+    rates = [(b[1] - a[1]) / ((b[0] - a[0]) / 60.0)
+             for a, b in zip(seen, seen[1:]) if b[0] - a[0] > 20]
+    climbs = [r for r in rates if r > 0]
+    return max(climbs) if climbs else 0.0               # the worst case is the one to plan for
+
+
+def poll_delay(rows, state):
+    """How long an interface should wait before asking again.
+
+    A flat five minutes is a blindfold on a fast plan: one account here was
+    measured climbing 53 points in a single five-minute gap, so it can pass
+    from comfortable to spent without ever being seen near the threshold, and
+    the switch that should have happened never does.
+
+    Polling the active account costs nothing -- Claude Code writes its usage to
+    disk and that is where it is read -- so the period follows how fast it is
+    burning rather than a fixed clock. The other accounts keep their own
+    freshness window and are not refetched by this.
+    """
+    active = active_row(rows)
+    if not active or active.get("status") != OK:
+        return POLL_SEC
+    used = worst_general(active)
+    if used is None:
+        return POLL_SEC
+
+    headroom = state["max_usage"] - used
+    if headroom <= 0:
+        return POLL_FLOOR_SEC                            # already past it: look now
+    rate = burn_rate(active["name"])
+    if rate <= 0:
+        # No measured climb: stay coarse until the threshold is near anyway.
+        return POLL_SEC if headroom > 25 else max(POLL_FLOOR_SEC, POLL_SEC // 4)
+    minutes_left = headroom / rate
+    wanted = minutes_left * 60 / SAMPLES_PER_APPROACH
+    return int(max(POLL_FLOOR_SEC, min(POLL_SEC, wanted)))
+
+
 def switch_trigger(active, target, state):
     """Why the active account should be abandoned, or None to stay."""
     if is_off(active, state):
@@ -1192,6 +1263,16 @@ def _point_at(name):
         raise
 
 
+class SwitchFailed(RuntimeError):
+    """Why a switch did not happen.
+
+    It used to return False and print nothing, and the menu bar could only say
+    "Could not switch. Try it in a terminal to see why" — where the terminal
+    printed nothing either. A failure nobody can read is a failure nobody can
+    fix, which is how an afternoon goes to forcing it with the old tool.
+    """
+
+
 def switch(name):
     """Make `name` the active profile.
 
@@ -1206,7 +1287,7 @@ def switch(name):
     exists nowhere else.
     """
     if name not in profiles():
-        return False
+        raise SwitchFailed("no profile named %r" % name)
     with guard("switch"):
         current = active_profile()
         if current == name:
@@ -1214,19 +1295,23 @@ def switch(name):
 
         target = keychain_read(profile_service(name))
         if not target:
-            return False
+            raise SwitchFailed(
+                "the keychain has no readable credentials for %r (service %r) — "
+                "reconnect that account" % (name, profile_service(name)))
         live = keychain_read(LIVE_SERVICE)
         if current and live:
             keychain_write(profile_service(current), live)
 
         if not keychain_write(LIVE_SERVICE, target):
-            return False
+            raise SwitchFailed(
+                "the keychain refused the write to %r — unlock the login keychain "
+                "and try again" % LIVE_SERVICE)
         try:
             _point_at(name)
-        except (OSError, RuntimeError):
+        except (OSError, RuntimeError) as exc:
             if live:                       # put the live slot back as it was
                 keychain_write(LIVE_SERVICE, live)
-            return False
+            raise SwitchFailed("%s" % exc) from exc
 
         _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=name), indent=2)
         _CONFIG_CACHE.clear()
@@ -1642,8 +1727,9 @@ def for_json(rows, state, plan=None):
         "show_saturated": state["mode"] == MODE_MODEL,
         "throttled_for": pause,
         "throttle_notice": throttle_notice(pause) if pause else None,
-        # The app polls on this rather than hardcoding a copy of the period.
-        "poll_after_sec": POLL_SEC,
+        # The app polls on this rather than hardcoding a copy of the period,
+        # which is what lets the period follow the burn instead of a clock.
+        "poll_after_sec": poll_delay(rows, state),
         "next": {"name": target["name"] if target else None,
                  "reason": why, "blocked_by": blocked,
                  "staying": put_off,
@@ -1682,7 +1768,11 @@ def main():
     command = args[0] if args else None
 
     if command == "--switch":
-        sys.exit(0 if switch(args[1]) else 1)
+        try:
+            sys.exit(0 if switch(args[1]) else 1)
+        except SwitchFailed as exc:
+            print(exc, file=sys.stderr)
+            sys.exit(1)
 
     if command == "--reconnect":
         reconnect(args[1])

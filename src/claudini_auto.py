@@ -268,10 +268,14 @@ class Console:
         if cu.needs_login(row):
             self.reconnect(scr, row["name"])
             return
-        ok = cu.switch(row["name"])
+        try:
+            ok = cu.switch(row["name"])
+            note = ("switched to %s — relaunch `claude` in your terminals"
+                    % row["name"]) if ok else "switch failed"
+        except cu.SwitchFailed as exc:
+            note = "switch failed: %s" % exc
         with self.lock:
-            self.message = ("switched to %s — relaunch `claude` in your terminals"
-                            % row["name"]) if ok else "switch failed"
+            self.message = note
         self.spawn(run_auto=False)
 
     def toggle_auto(self):
