@@ -118,13 +118,16 @@ GENERAL_KINDS = ("session", "weekly_all")
 LIMIT_LABELS = {"session": "Session (5h)", "weekly_all": "Week (all models)"}
 
 # Rate limit tiers seen in the wild, biggest allowance first: (substring in the
-# tier name, rank, display label). Percentages are only comparable within a
-# tier — 20% of a team seat is not 20% of a Max 20x.
-PLAN_TIERS = (("max_20x", 4, "max 20x"), ("max_5x", 3, "max 5x"),
-              ("raven", 2, "team"), ("pro", 1, "pro"))
-# An unrecognised tier is never demoted for something we simply don't know:
-# it ranks with the best, which falls back to plain model-first behaviour.
-UNKNOWN_RANK = max(rank for _, rank, _ in PLAN_TIERS)
+# tier name, size in Pro plans, display label). The size is what weighs one
+# account's preferred-model quota against another's: 10% of a Max 20x is less
+# than 60% of a Max 5x. A premium team seat sits near a Max 5x; a standard one
+# has no preferred model to weigh.
+PLAN_TIERS = (("max_20x", 20, "max 20x"), ("max_5x", 5, "max 5x"),
+              ("raven", 5, "team"), ("pro", 1, "pro"))
+# An unrecognised tier counts as the biggest. Weighed too high, its quota is
+# spent first and left at the line like any other; weighed too low, it would
+# sit unused while the others run out.
+UNKNOWN_SIZE = max(size for _, size, _ in PLAN_TIERS)
 
 # On a team plan the seat decides which models you get: a standard seat has no
 # premium model, so a missing quota line there means "no access", not "quota
@@ -220,7 +223,7 @@ DEFAULT_STATE = {
     # thing as remaining margin, which read backwards against the display.
     # Lower it to move off an account before you hit the wall rather than at it.
     "max_usage": 95,
-    "cooldown_min": 10,    # minimum delay between two automatic switches
+    "cooldown_min": 10,    # after any switch, by hand or not, before an automatic one
     "last_switch": 0,
     # Accounts you have switched off: still read and shown, never chosen. For
     # an account you want to keep for something else, or rest for a while.
@@ -1015,10 +1018,24 @@ def model_headroom(p):
     return 100 if p["limits"] else None
 
 
-def saturated_models(p):
-    """Models whose dedicated weekly quota is spent."""
+def model_reserve(p, max_usage):
+    """How much of the preferred model is left before the line, in Pro plans.
+
+    The line is max_usage, the one the general windows are held to, so an
+    account is left with a margin rather than at the wall. Weighed by plan
+    size: ranking the largest plan first took a Max 5x with most of its Fable
+    left for a Max 20x scraping the bottom.
+    """
+    headroom = model_headroom(p)
+    if headroom is None:
+        return 0
+    return max(0, headroom - (100 - max_usage)) * plan_size(p)
+
+
+def saturated_models(p, max_usage):
+    """Models whose dedicated weekly quota is spent, by the policy's line."""
     return [l["label"] for l in p["limits"]
-            if l["kind"] not in GENERAL_KINDS and l["percent"] >= 100]
+            if l["kind"] not in GENERAL_KINDS and l["percent"] >= max_usage]
 
 
 def _tier_of(p):
@@ -1036,10 +1053,10 @@ def plan_label(p):
     return (label + " " + seat) if seat else label
 
 
-def plan_rank(p):
-    """How big this account's allowance is, as a comparable number."""
+def plan_size(p):
+    """How big this account's allowance is, in Pro plans."""
     found = _tier_of(p)
-    return found[1] if found else UNKNOWN_RANK
+    return found[1] if found else UNKNOWN_SIZE
 
 
 def weekly_reset(p):
@@ -1087,7 +1104,7 @@ def preference(rows, state):
         return []
     if state.get("mode") == MODE_ENDURANCE:
         return _by_endurance(usable)
-    return _by_model(usable)
+    return _by_model(usable, state["max_usage"])
 
 
 def pick_target(rows, state):
@@ -1096,20 +1113,15 @@ def pick_target(rows, state):
     return order[0] if order else None
 
 
-def _by_model(usable):
+def _by_model(usable, max_usage):
     """Protect the preferred model.
 
-    Prefer an account that still has it, but only among those on the largest
-    plan available — a team seat with untouched Fable is worth less than a
-    Max 20x with real headroom left. When no account on that plan has the
-    model, fall back to whichever is freshest overall.
+    The accounts that still have it come first, the biggest reserve of it
+    first (see model_reserve); then the others, freshest overall first, for
+    when it is spent everywhere.
     """
-    best_plan = max(plan_rank(p) for p in usable)
-    with_model = [p for p in usable
-                  if (model_headroom(p) or 0) > 0 and plan_rank(p) >= best_plan]
-    if with_model:
-        return sorted(with_model, key=lambda p: -(model_headroom(p) or 0))
-    return sorted(usable, key=lambda p: -(general_headroom(p) or 0))
+    return sorted(usable, key=lambda p: (-model_reserve(p, max_usage),
+                                         -(general_headroom(p) or 0)))
 
 
 def _by_endurance(usable):
@@ -1229,12 +1241,12 @@ def switch_trigger(active, target, state):
             return "%s resets in %s, spend it before it is lost" % (
                 target["name"], until(int(theirs - dt.datetime.now().timestamp())))
         return "%s has more room left" % target["name"]
-    if not has_preferred_model(active) and has_preferred_model(target):
-        return "this seat has no %s; %s does" % (PREFERRED_MODEL, target["name"])
-    if plan_rank(target) > plan_rank(active):
-        return "%s runs on a larger plan with more headroom" % target["name"]
-    if (model_headroom(active) or 0) <= 0 < (model_headroom(target) or 0):
-        return "%s spent here, available on %s" % (PREFERRED_MODEL, target["name"])
+    # A seat without the model has no reserve of it either, so this covers it.
+    line = state["max_usage"]
+    if model_reserve(active, line) <= 0 < model_reserve(target, line):
+        found = preferred_limit(active)
+        here = "at %d%%" % found["percent"] if found else "not on this seat"
+        return "%s %s here, %s still has it" % (PREFERRED_MODEL, here, target["name"])
     return None
 
 
@@ -1464,12 +1476,16 @@ class SwitchFailed(RuntimeError):
     """
 
 
-def switch(name):
-    """Make `name` the active profile.
+def switch(name, why):
+    """Make `name` the active profile, and log it with `why`. Raises
+    SwitchFailed with the cause.
 
     The outgoing profile's credentials are saved first: Claude Code refreshes
     the live slot as it runs, so the copy sitting in the profile is behind by
     however long that profile was active.
+
+    Every switch starts the cooldown, a hand-made one included: when only the
+    automatic ones did, the next tick undid your choice within a minute.
 
     Held under a lock, and the current profile and live credentials are read
     inside it. Two switches overlapping — a click landing on an automatic
@@ -1482,7 +1498,7 @@ def switch(name):
     with guard("switch"):
         current = active_profile()
         if current == name:
-            return True
+            return
 
         target = keychain_read(profile_service(name))
         if not target:
@@ -1518,7 +1534,9 @@ def switch(name):
 
         _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=name), indent=2)
         _CONFIG_CACHE.clear()
-        return True
+        update_state(last_switch=dt.datetime.now().timestamp())
+    # The log needs no lock of the switch's, and trimming it can take a while.
+    record({"switch": {"from": current, "to": name, "why": why}})
 
 
 # A profile's name ends up in a path, a keychain service name and a command
@@ -1716,11 +1734,11 @@ def auto_tick(rows=None):
 
     if not state["enabled"] or blocked or staying(rows, plan) or target is None:
         return rows, False, blocked or why, plan
-    if not switch(target["name"]):
-        return rows, False, "switching to %s failed" % target["name"], plan
+    try:                     # uncaught, a failure ends the menu bar's whole poll
+        switch(target["name"], why)
+    except SwitchFailed as exc:
+        return rows, False, "switching to %s failed: %s" % (target["name"], exc), plan
 
-    update_state(last_switch=dt.datetime.now().timestamp())
-    record({"switch": {"from": active["name"], "to": target["name"], "why": why}})
     # Only the active account changed: no need to read everything again.
     for row in rows:
         row["active"] = (row["name"] == target["name"])
@@ -1919,7 +1937,7 @@ def for_json(rows, state, plan=None):
             "limit_reset": r.get("limit_reset"),
             "needs_login": needs_login(r),
             "binding": binding_limit(r),
-            "saturated": saturated_models(r),
+            "saturated": saturated_models(r, state["max_usage"]),
             "limits": [{
                 "kind": l["kind"],
                 "label": l["label"],
@@ -1985,7 +2003,8 @@ def main():
 
     if command == "--switch":
         try:
-            sys.exit(0 if switch(args[1]) else 1)
+            switch(args[1], "chosen by hand")
+            return
         except SwitchFailed as exc:
             print(exc, file=sys.stderr)
             sys.exit(1)

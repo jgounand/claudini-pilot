@@ -58,17 +58,19 @@ there are two modes. Switch with `m` in the console, from the menu bar, or
 
 The default. The policy is *stay on a model, then fall back*:
 
-1. Prefer an account that still has the target model available (Fable by default)
-   — but only among accounts on the largest plan you have. A team seat with
-   untouched Fable is worth less than a Max 20x with real headroom left, because
-   percentages aren't comparable across plans: 20% of a team seat is not 20% of
-   a Max 20x.
-2. When no account on that plan has the model, take the one with the most
-   general headroom instead.
+1. Prefer the account with the most of the target model left (Fable by default),
+   counted up to the same `max_usage` line as the general limits — at 96% it is
+   as good as spent. What is left is weighed by plan size, because percentages
+   aren't comparable across plans: 10% of a Max 20x is less than 60% of a Max 5x.
+2. When no account has the model left, take the one with the most general
+   headroom instead.
 3. Never pick an account whose general limits are already maxed — a full Fable
    quota is worthless if the 5-hour window is at 100%.
-4. Only switch when the current account is actually blocked, and never more than
-   once per cooldown (10 min default). No churn.
+4. Only switch when the current account is actually blocked — general limits at
+   the line, or the model spent here while another account still has it. A
+   bigger plan elsewhere is not a reason to move. Never more than once per
+   cooldown (10 min default), and a switch you make by hand starts it too, so
+   your choice is not undone by the next tick.
 
 On a team plan the *seat* decides which models you get. A standard seat has no
 premium model, and reports no quota line for it — which is not the same as an
@@ -330,8 +332,8 @@ Tuning lives in `~/.claudini/auto.json`:
 |---|---|---|
 | `enabled` | `false` | auto-switching armed |
 | `mode` | `model` | `model` keeps Fable available, `endurance` spends what resets soonest |
-| `max_usage` | `95` | an account counts as spent once its fullest window reaches this % — lower it to move off an account *before* hitting the wall |
-| `cooldown_min` | `10` | minutes between two automatic switches |
+| `max_usage` | `95` | an account counts as spent once its fullest window reaches this %, and in `model` mode its Fable once that quota does — lower it to move off an account *before* hitting the wall |
+| `cooldown_min` | `10` | minutes after any switch, by hand or automatic, before the next automatic one |
 | `disabled` | `[]` | accounts switched off — set from the menu's switches or `--off` / `--on` |
 
 ## Switching, without claudini

@@ -92,15 +92,15 @@ class PreferredModel(unittest.TestCase):
 
 
 class Plans(unittest.TestCase):
-    def test_bigger_tier_outranks(self):
+    def test_bigger_tier_is_bigger(self):
         big = account("a", tier="default_claude_max_20x")
         small = account("b", tier="default_raven", seat="team_standard")
-        self.assertGreater(cu.plan_rank(big), cu.plan_rank(small))
+        self.assertGreater(cu.plan_size(big), cu.plan_size(small))
 
     def test_unknown_tier_is_not_demoted(self):
         """We never punish an account for a tier we simply do not recognise."""
-        self.assertEqual(cu.plan_rank(account("a", tier="something_new")),
-                         cu.UNKNOWN_RANK)
+        self.assertEqual(cu.plan_size(account("a", tier="something_new")),
+                         cu.UNKNOWN_SIZE)
 
     def test_labels(self):
         self.assertEqual(cu.plan_label(account("a")), "max 20x")
@@ -127,18 +127,68 @@ class ModelMode(unittest.TestCase):
         rows = [account("spent", model=100), account("free", model=20)]
         self.assertEqual(cu.pick_target(rows, state())["name"], "free")
 
-    def test_only_among_the_largest_plan(self):
-        """A team seat with untouched Fable is worth less than a Max account
-        with real headroom: percentages are not comparable across plans."""
-        rows = [account("team", session=78, weekly=26, tier="default_raven",
+    def test_a_standard_seat_does_not_win_on_a_missing_quota_line(self):
+        rows = [account("team", session=10, weekly=10, tier="default_raven",
                         seat="team_standard"),
-                account("max", session=14, weekly=64, model=100)]
+                account("max", session=14, weekly=64, model=80)]
         self.assertEqual(cu.pick_target(rows, state())["name"], "max")
+
+    def test_most_of_a_small_plan_beats_the_dregs_of_a_big_one(self):
+        """2026-10-20: a Max 5x with Fable at 31% lost to a Max 20x at 90%,
+        because only the largest plan was looked at."""
+        rows = [account("big", weekly=76, model=90),
+                account("small", weekly=24, model=31, tier="default_claude_max_5x")]
+        self.assertEqual(cu.pick_target(rows, state())["name"], "small")
+
+    def test_the_reserve_is_weighed_by_plan_size(self):
+        rows = [account("big", model=80),                       # 15 x 20
+                account("small", model=60, tier="default_claude_max_5x")]  # 35 x 5
+        self.assertEqual(cu.pick_target(rows, state())["name"], "big")
+
+    def test_the_model_is_spent_at_the_same_line_as_the_rest(self):
+        """At 96% the model is as good as gone: move before the wall, not at it."""
+        rows = [account("here", model=96, active=True), account("other", model=50)]
+        target, why, blocked = cu.plan_switch(rows, state(enabled=True))
+        self.assertEqual(target["name"], "other")
+        self.assertIn(cu.PREFERRED_MODEL, why)
+        self.assertIsNone(blocked)
+
+    def test_a_bigger_plan_is_no_reason_to_leave_the_model(self):
+        """The 2026-10-20 switch away from the account that still had Fable."""
+        rows = [account("here", model=31, tier="default_claude_max_5x", active=True),
+                account("big", model=50)]
+        target, _, blocked = cu.plan_switch(rows, state(enabled=True))
+        self.assertEqual(target["name"], "big")                 # named as better…
+        self.assertEqual(blocked, "current account is not blocked yet")   # …not taken
+
+    def test_a_seat_without_the_model_moves_to_one_with_it(self):
+        rows = [account("std", tier="default_raven", seat="team_standard", active=True),
+                account("max", model=50)]
+        target, why, blocked = cu.plan_switch(rows, state(enabled=True))
+        self.assertEqual(target["name"], "max")
+        self.assertIn("not on this seat", why)
+        self.assertIsNone(blocked)
+
+    def test_but_not_to_another_seat_where_it_is_spent(self):
+        rows = [account("std", tier="default_raven", seat="team_standard", active=True),
+                account("prem", session=5, weekly=5, model=100, tier="default_raven",
+                        seat="team_premium")]
+        self.assertEqual(cu.plan_switch(rows, state(enabled=True))[2],
+                         "current account is not blocked yet")
 
     def test_falls_back_to_headroom_when_nobody_has_the_model(self):
         rows = [account("tight", session=80, model=100),
-                account("roomy", session=20, model=100)]
+                account("roomy", session=20, model=97)]
         self.assertEqual(cu.pick_target(rows, state())["name"], "roomy")
+
+    def test_the_others_still_follow_in_order(self):
+        """Ranked, not filtered: the menu lists every usable account in the
+        order it would take them."""
+        rows = [account("spent", session=50, model=100),
+                account("has-it", model=40),
+                account("spent-roomier", session=5, model=100)]
+        order = [p["name"] for p in cu.preference(rows, state())]
+        self.assertEqual(order, ["has-it", "spent-roomier", "spent"])
 
 
 class EnduranceMode(unittest.TestCase):
@@ -738,6 +788,47 @@ class StrayConfig(unittest.TestCase):
         cu._point_at("other")
         self.assertEqual(os.readlink(cu.CLAUDE_JSON), cu.profile_config("other"))
         self.assertFalse(os.path.exists(cu.BACKUPS_DIR))
+
+
+class SwitchingByHand(unittest.TestCase):
+    """2026-10-20: you picked eyoticdemo for its Fable, and the next tick took
+    you straight back off it — only automatic switches started the cooldown."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.saved = {name: getattr(cu, name) for name in
+                      ("CLAUDINI_HOME", "PROFILES_DIR", "CLAUDE_JSON", "CONFIG",
+                       "STATE_FILE", "HISTORY_FILE", "keychain_read", "keychain_write")}
+        cu.CLAUDINI_HOME = self.home
+        cu.PROFILES_DIR = os.path.join(self.home, "profiles")
+        cu.CLAUDE_JSON = os.path.join(self.home, "claude.json")
+        cu.CONFIG = os.path.join(self.home, "config.json")
+        cu.STATE_FILE = os.path.join(self.home, "auto.json")
+        cu.HISTORY_FILE = os.path.join(self.home, "history.jsonl")
+        cu.keychain_read = lambda service: {"claudeAiOauth": {}}
+        cu.keychain_write = lambda service, payload: True
+        for name in ("big", "small"):
+            cu._write_json(cu.profile_config(name), {})
+        cu._write_json(cu.CONFIG, {"active_profile": "big"})
+        cu._CONFIG_CACHE.clear()
+
+    def tearDown(self):
+        for name, value in self.saved.items():
+            setattr(cu, name, value)
+        cu._CONFIG_CACHE.clear()
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_the_next_tick_leaves_your_choice_alone(self):
+        cu.switch("small", "chosen by hand")
+        # Even a choice the policy disagrees with holds for the cooldown.
+        rows = [account("small", model=97, active=True), account("big", model=50)]
+        _, _, blocked = cu.plan_switch(rows, dict(cu.load_state(), enabled=True))
+        self.assertIn("cooldown", blocked)
+
+    def test_it_is_logged_like_an_automatic_one(self):
+        cu.switch("small", "chosen by hand")
+        self.assertEqual(cu.read_history()[-1]["switch"],
+                         {"from": "big", "to": "small", "why": "chosen by hand"})
 
 
 if __name__ == "__main__":

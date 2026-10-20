@@ -273,9 +273,8 @@ class Console:
             self.reconnect(scr, row["name"])
             return
         try:
-            ok = cu.switch(row["name"])
-            note = ("switched to %s — relaunch `claude` in your terminals"
-                    % row["name"]) if ok else "switch failed"
+            cu.switch(row["name"], "chosen by hand")
+            note = "switched to %s — relaunch `claude` in your terminals" % row["name"]
         except cu.SwitchFailed as exc:
             note = "switch failed: %s" % exc
         with self.lock:
