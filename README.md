@@ -100,6 +100,23 @@ churn.
 Both modes ignore accounts whose general limits are already spent, and both say
 what they are doing: *"license resets in 22h34, spend it before it is lost"*.
 
+### Draining the last few percent
+
+`max_usage` leaves every account a few percent short of its wall. Once **every**
+account in rotation is past that line, stopping there would leave that margin
+unused everywhere until it resets, so the policy spends it instead: it stays on
+the account in use until that one hits its wall, then moves to the account with
+the most work left in it (percent × plan size; in `model` mode one that still
+has Fable first), and so on. The cooldown does not hold you on an account that
+is at its wall — every session on it is stopped until the switch.
+
+Hitting the wall stops the sessions running on that account, which is accepted
+here: claude-map's switch-and-resume picks them up on the next account. As soon
+as any account drops back under the line (a reset), the normal policy takes over
+again. The menu, console and fleet line say so: *"all accounts past 95% —
+draining the last 4% of work"*. On by default; `claudini-usage --drain
+off`, or `d` in the console, to stop at the line as before.
+
 Auto-switching is **off** by default. Turn it on with `a` in the console, from
 the menu bar, or `claudini-usage --auto on`.
 
@@ -322,6 +339,7 @@ claudini-usage --history       # write and open the usage history page
 claudini-usage --actions       # the command list, as JSON (what the menu shows)
 claudini-usage --auto on|off   # arm or disarm auto-switching
 claudini-usage --mode model|endurance   # which goal the policy optimises for
+claudini-usage --drain on|off           # past the line everywhere: spend the rest
 claudini-usage --tick          # run one auto-switch decision now
 claudini-auto                  # the console: a auto · m mode · r refresh · 1-9 switch · q quit
 ```
@@ -333,6 +351,7 @@ Tuning lives in `~/.claudini/auto.json`:
 | `enabled` | `false` | auto-switching armed |
 | `mode` | `model` | `model` keeps Fable available, `endurance` spends what resets soonest |
 | `max_usage` | `95` | an account counts as spent once its fullest window reaches this %, and in `model` mode its Fable once that quota does — lower it to move off an account *before* hitting the wall |
+| `drain` | `true` | once every account is past `max_usage`, spend what is left above it, one account at a time, up to the wall |
 | `cooldown_min` | `10` | minutes after any switch, by hand or automatic, before the next automatic one |
 | `disabled` | `[]` | accounts switched off — set from the menu's switches or `--off` / `--on` |
 

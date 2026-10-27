@@ -223,6 +223,10 @@ DEFAULT_STATE = {
     # thing as remaining margin, which read backwards against the display.
     # Lower it to move off an account before you hit the wall rather than at it.
     "max_usage": 95,
+    # Once every account is past max_usage, spend what is left above it — the
+    # last few percent of each, one account at a time, up to the wall — rather
+    # than stop with that much unused everywhere. See draining().
+    "drain": True,
     "cooldown_min": 10,    # after any switch, by hand or not, before an automatic one
     "last_switch": 0,
     # Accounts you have switched off: still read and shown, never chosen. For
@@ -1087,6 +1091,31 @@ def is_off(p, state):
     return p["name"] in state["disabled"]
 
 
+# The wall itself. Draining spends up to it, because nothing above it is left.
+DRAIN_LINE = 100
+
+
+def draining(rows, state):
+    """Whether the margin above max_usage is being spent.
+
+    Only once no account in rotation has room under the line: max_usage is
+    there to leave each account before its wall, and that is worth nothing
+    when every account is past it — stopping there leaves the last few
+    percent of each unused until it resets. Any account freed by a reset
+    ends it, so this never keeps you off an account the normal policy wants.
+    """
+    if not state.get("drain", True):
+        return False
+    rotation = in_rotation(rows, state)
+    return (not usable_accounts(rotation, state["max_usage"])
+            and bool(usable_accounts(rotation, DRAIN_LINE)))
+
+
+def policy_line(rows, state):
+    """The usage an account counts as spent at: max_usage, or the wall while draining."""
+    return DRAIN_LINE if draining(rows, state) else state["max_usage"]
+
+
 def in_rotation(rows, state):
     """The accounts the policy may choose from: every one not switched off."""
     return [p for p in rows if not is_off(p, state)]
@@ -1099,6 +1128,8 @@ def preference(rows, state):
     the choice explain itself — otherwise the greenest-looking account not
     being chosen just looks like a bug.
     """
+    if draining(rows, state):
+        return _by_drain(usable_accounts(in_rotation(rows, state), DRAIN_LINE), state)
     usable = usable_accounts(in_rotation(rows, state), state["max_usage"])
     if not usable:
         return []
@@ -1122,6 +1153,23 @@ def _by_model(usable, max_usage):
     """
     return sorted(usable, key=lambda p: (-model_reserve(p, max_usage),
                                          -(general_headroom(p) or 0)))
+
+
+def _by_drain(usable, state):
+    """Spend the margin one account at a time, the one in use first.
+
+    Each account has only a few percent left, so hopping to whichever looks
+    roomiest would switch on every reading; the account in use is drained to
+    its wall before the next is taken. The next is the one with the most work
+    left in it — percent times plan size, since 5% of a Max 20x is four times
+    5% of a Max 5x — and in model mode one that still has the preferred model
+    goes first, as it does above the line.
+    """
+    def key(p):
+        lacks_model = (state.get("mode") != MODE_ENDURANCE
+                       and model_reserve(p, DRAIN_LINE) <= 0)
+        return (not p["active"], lacks_model, -(general_headroom(p) or 0) * plan_size(p))
+    return sorted(usable, key=key)
 
 
 def _by_endurance(usable):
@@ -1213,7 +1261,9 @@ def poll_delay(rows, state):
     if used is None:
         return POLL_SEC
 
-    headroom = state["max_usage"] - used
+    # While draining, the line that matters is the wall: pacing on max_usage
+    # would poll at the floor for the whole of the last few percent.
+    headroom = policy_line(rows, state) - used
     if headroom <= 0:
         return POLL_FLOOR_SEC                            # already past it: look now
     rate = burn_rate(active["name"])
@@ -1319,6 +1369,9 @@ def fleet(rows, state):
     waiting = first_to_recover(spent, state["max_usage"])
     return {
         "usable": len(usable_accounts(in_rotation(rows, state), state["max_usage"])),
+        # Past the line everywhere and spending the rest: "0 usable" alone
+        # would read as an outage while work carries on.
+        "draining": draining(rows, state),
         "total": len(rows),
         "off": len(rows) - len(in_rotation(rows, state)),
         # In whole accounts: 191% is nearly two untouched weeks of allowance.
@@ -1332,6 +1385,8 @@ def fleet(rows, state):
 
 def fleet_line(summary):
     parts = ["%d/%d usable" % (summary["usable"], summary["total"])]
+    if summary.get("draining"):
+        parts.append("draining the rest")
     if summary.get("off"):
         parts.append("%d off" % summary["off"])
     parts.append("%d%% weekly in reserve" % summary["weekly_reserve"])
@@ -1374,20 +1429,34 @@ def plan_switch(rows, state):
                     % until(seconds_until_epoch(recovers_at(waiting, state["max_usage"]))),
                     "waiting for a reset")
         return None, "no account can be read right now", "nothing to switch to"
+    drain = draining(rows, state)
     if active is None or target["name"] == active["name"]:
-        return target, "already the best account available", None
+        return target, (drain_why(target, state) if drain
+                        else "already the best account available"), None
 
     trigger = switch_trigger(active, target, state)
     why = trigger or "more headroom than the current account"
+    if trigger and drain:
+        why = "%s; %s" % (trigger, drain_why(target, state))
     if not trigger:
         return target, why, "current account is not blocked yet"
     if not state["enabled"]:
         return target, why, "auto-switching is off"
 
+    # The cooldown stops two working accounts trading places. An account at
+    # its wall cannot be traded back to, and every session on it is stopped
+    # until the switch — which, while draining, is the ordinary way to leave.
+    at_wall = (worst_general(active) or 0) >= DRAIN_LINE
     remaining = state["cooldown_min"] * 60 - (dt.datetime.now().timestamp() - state["last_switch"])
-    if remaining > 0:
+    if remaining > 0 and not at_wall:
         return target, why, "cooldown, %d min left" % (remaining // 60 + 1)
     return target, why, None
+
+
+def drain_why(p, state):
+    """What draining is doing, in the words the menu and the console show."""
+    return "all accounts past %d%% — draining the last %d%% of %s" % (
+        state["max_usage"], general_headroom(p) or 0, p["name"])
 
 
 # --- managing profiles -------------------------------------------------------
@@ -1957,6 +2026,8 @@ def for_json(rows, state, plan=None):
         "fleet": fleet_line(fleet(rows, state)),
         "mode": state["mode"],
         "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
+        "drain": state.get("drain", True),
+        "draining": draining(rows, state),
         # Only meaningful while the policy is protecting that model.
         "show_saturated": state["mode"] == MODE_MODEL,
         "throttled_for": pause,
@@ -1988,6 +2059,7 @@ ACTIONS = [
     ("--on NAME", "switch an account back on"),
     ("--auto on|off", "arm or disarm automatic switching"),
     ("--mode model|endurance", "which goal the policy optimises for"),
+    ("--drain on|off", "once every account is past the line, spend what is left above it"),
     ("--tick", "run one auto-switch decision now"),
     ("--history", "write and open the usage history page"),
     ("--actions", "this list, as JSON"),
@@ -2079,6 +2151,16 @@ def main():
             json.dump(for_json(collect(), state), sys.stdout)
             return
         print("mode: %s" % state["mode"])
+        return
+
+    if command == "--drain":                     # --drain on | off
+        state = load_state()
+        if len(args) > 1 and args[1] in ("on", "off"):
+            state = update_state(drain=args[1] == "on")
+        if "--json" in args:
+            json.dump(for_json(collect(), state), sys.stdout)
+            return
+        print("drain: %s" % ("on" if state.get("drain", True) else "off"))
         return
 
     if command == "--tick":                      # one decision, on its own

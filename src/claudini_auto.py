@@ -51,7 +51,7 @@ LAYOUT = _layout()
 COL = {name: x for name, (x, _) in LAYOUT.items()}
 WIDTH = {name: w for name, (_, w) in LAYOUT.items()}
 COL_LIMITS = {"session": COL["session"], "weekly_all": COL["week"]}
-FOOTER = (" a auto · m mode · r refresh · 1-9 switch or reconnect · q quit"
+FOOTER = (" a auto · m mode · d drain · r refresh · 1-9 switch or reconnect · q quit"
           "   ⟲ = /limit-reset ")
 
 
@@ -297,6 +297,13 @@ class Console:
             self.plan = cu.plan_switch(self.rows, state)
             self.message = "mode: %s" % state["mode"]
 
+    def toggle_drain(self):
+        state = cu.update_state(drain=not cu.load_state().get("drain", True))
+        with self.lock:
+            self.state = state
+            self.plan = cu.plan_switch(self.rows, state)
+            self.message = "drain %s" % ("on" if state["drain"] else "off")
+
     # --- key loop ------------------------------------------------------------
 
     def run(self, scr):
@@ -322,6 +329,8 @@ class Console:
                 self.toggle_auto()
             elif key in (ord("m"), ord("M")):
                 self.cycle_mode()
+            elif key in (ord("d"), ord("D")):
+                self.toggle_drain()
             elif ord("1") <= key <= ord("9"):
                 self.choose(scr, key - ord("1"))
 

@@ -250,6 +250,98 @@ class Planning(unittest.TestCase):
         self.assertEqual(blocked, "waiting for a reset")
 
 
+class Draining(unittest.TestCase):
+    """2026-10-27: every account at 95% and the last 5% of each left unused.
+    Past the line everywhere, the margin is spent one account at a time."""
+
+    def test_only_once_every_account_is_past_the_line(self):
+        rows = [account("here", session=97, active=True), account("free", session=40)]
+        self.assertFalse(cu.draining(rows, state()))
+        target, why, _ = cu.plan_switch(rows, state(enabled=True))
+        self.assertEqual(target["name"], "free")            # normal mode, as before
+        self.assertNotIn("draining", why)
+
+    def test_the_account_in_use_is_drained_to_its_wall_first(self):
+        """Hopping to the roomiest at every reading would switch all the time."""
+        rows = [account("here", session=97, active=True), account("roomier", session=95)]
+        self.assertTrue(cu.draining(rows, state()))
+        target, why, blocked = cu.plan_switch(rows, state(enabled=True))
+        self.assertEqual(target["name"], "here")
+        self.assertIn("draining the last 3% of here", why)
+        self.assertIsNone(blocked)
+        self.assertTrue(cu.staying(rows, (target, why, blocked)))
+
+    def test_at_the_wall_it_moves_to_the_most_work_left(self):
+        """5% of a Max 20x outlasts 5% of a Max 5x."""
+        rows = [account("here", session=100, active=True),
+                account("small", session=95, tier="default_claude_max_5x"),
+                account("big", session=96)]
+        target, why, blocked = cu.plan_switch(rows, state(enabled=True))
+        self.assertEqual(target["name"], "big")
+        self.assertIn("100%", why)
+        self.assertIn("draining the last 4% of big", why)
+        self.assertIsNone(blocked)
+
+    def test_in_model_mode_the_model_still_goes_first(self):
+        rows = [account("here", session=100, active=True),
+                account("roomy", session=95, model=100),
+                account("has-it", session=98, model=60)]
+        self.assertEqual(cu.pick_target(rows, state())["name"], "has-it")
+        endurance = state(cu.MODE_ENDURANCE)
+        self.assertEqual(cu.pick_target(rows, endurance)["name"], "roomy")
+
+    def test_the_cooldown_does_not_hold_you_at_the_wall(self):
+        """Every session on it is stopped until the switch."""
+        rows = [account("here", session=100, active=True), account("next", session=96)]
+        recent = state(enabled=True, last_switch=dt.datetime.now().timestamp())
+        self.assertIsNone(cu.plan_switch(rows, recent)[2])
+
+    def test_but_still_holds_below_it(self):
+        rows = [account("here", session=97, active=True), account("free", session=10)]
+        recent = state(enabled=True, last_switch=dt.datetime.now().timestamp())
+        self.assertIn("cooldown", cu.plan_switch(rows, recent)[2])
+
+    def test_a_reset_ends_it(self):
+        """An account back under the line wins over the margin of the one in use."""
+        rows = [account("here", session=97, active=True), account("reset", session=0, weekly=96)]
+        self.assertTrue(cu.draining(rows, state()))
+        rows[1] = account("reset", session=2, weekly=40)
+        self.assertFalse(cu.draining(rows, state()))
+        self.assertEqual(cu.plan_switch(rows, state(enabled=True))[0]["name"], "reset")
+
+    def test_off_means_stopping_at_the_line_as_before(self):
+        rows = [account("here", session=97, active=True), account("other", session=96)]
+        target, why, blocked = cu.plan_switch(rows, state(enabled=True, drain=False))
+        self.assertEqual(blocked, "waiting for a reset")
+        self.assertIn("everything is spent", why)
+
+    def test_switched_off_accounts_neither_start_nor_feed_it(self):
+        rows = [account("here", session=97, active=True), account("off", session=10)]
+        self.assertTrue(cu.draining(rows, state(disabled=["off"])))
+        rows = [account("here", session=100, active=True), account("off", session=97)]
+        self.assertFalse(cu.draining(rows, state(disabled=["off"])))
+
+    def test_nothing_left_anywhere_is_not_draining(self):
+        rows = [account("late", session=100, weekly=100, weekly_in=6, active=True),
+                account("soon", session=100, weekly=100, weekly_in=1)]
+        self.assertFalse(cu.draining(rows, state()))
+        self.assertEqual(cu.plan_switch(rows, state(enabled=True))[2], "waiting for a reset")
+
+    def test_polling_paces_on_the_wall(self):
+        """On max_usage every reading of the last 5% would come at the floor."""
+        rows = [account("here", session=97, active=True), account("other", session=96)]
+        self.assertGreater(cu.poll_delay(rows, state()), cu.POLL_FLOOR_SEC)
+        self.assertEqual(cu.poll_delay(rows, state(drain=False)), cu.POLL_FLOOR_SEC)
+
+    def test_the_fleet_line_says_so(self):
+        rows = [account("here", session=97, active=True), account("other", session=96)]
+        self.assertIn("draining", cu.fleet_line(cu.fleet(rows, state())))
+        snap = cu.for_json(rows, state())
+        self.assertTrue(snap["draining"])
+        self.assertTrue(snap["drain"])
+        self.assertIn("draining", snap["next"]["reason"])
+
+
 class SwitchedOff(unittest.TestCase):
     """An account you switched off is still read and shown, never chosen."""
 
