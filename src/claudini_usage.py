@@ -499,7 +499,17 @@ def keychain_read(service):
 
 
 def keychain_write(service, payload):
-    """-U updates the existing item, which preserves its ACL."""
+    """-U updates the existing item, which preserves its ACL.
+
+    The payload goes in argv, visible to `ps` while `security` runs. It cannot
+    go through `security -i` instead (see keychain_write_plain): that reads
+    lines of at most 4096 bytes, and an OAuth entry is ~4 KB of JSON before any
+    escaping. Claude Code writes the same entry the same way once it outgrows
+    that line. Writing through Security.framework would make the keychain ask
+    for python3's access to items that trust /usr/bin/security, which an
+    unattended tool cannot answer. What this exposes, a same-user process can
+    already read with `security find-generic-password -w`, as this file does.
+    """
     return _security("add-generic-password", "-U",
                      "-s", service, "-a", ACCOUNT,
                      "-w", json.dumps(payload)).returncode == 0
