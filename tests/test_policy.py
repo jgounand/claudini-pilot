@@ -973,7 +973,13 @@ class ApiCredits(unittest.TestCase):
                              "ANTHROPIC_BASE_URL": "http://127.0.0.1:8799",
                              "CLAUDE_CODE_USE_BEDROCK": "1"}, "soon", "sk-ant-api-x")
         self.assertEqual(env, {"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-api-x",
-                               "CLAUDINI_CREDITS": "soon"})
+                               "CLAUDINI_CREDITS": "soon", "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB": "1"})
+
+    def test_a_key_is_never_written_through_argv_unless_plain(self):
+        with self.assertRaises(ValueError):
+            cu.keychain_write_plain("claudini-apikey-x", "sk-ant-api03 -w injected")
+        with self.assertRaises(ValueError):
+            cu.keychain_write_plain("claudini apikey", "sk-ant-api03-abc")
 
 
 class CreditProbing(unittest.TestCase):

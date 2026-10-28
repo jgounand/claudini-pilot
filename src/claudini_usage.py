@@ -509,6 +509,27 @@ def keychain_delete(service):
     _security("delete-generic-password", "-s", service, "-a", ACCOUNT)
 
 
+PLAIN_SECRET = re.compile(r"[A-Za-z0-9_-]+")
+
+
+def keychain_write_plain(service, secret):
+    """Store a secret without putting it in argv, where any process can read it
+    while `security` runs: `security -i` takes the command on stdin instead.
+    Its parser splits on spaces and quotes, so only plain tokens go this way,
+    and it exits 0 whatever happens — the write is checked by reading back."""
+    if not (PLAIN_SECRET.fullmatch(secret) and PLAIN_SECRET.fullmatch(service)
+            and PLAIN_SECRET.fullmatch(ACCOUNT.replace(".", ""))):
+        raise ValueError("only plain tokens can be written through security's stdin")
+    subprocess.run(["/usr/bin/security", "-i"], capture_output=True, text=True,
+                   input="add-generic-password -U -s %s -a %s -w %s\n" % (service, ACCOUNT, secret))
+    return keychain_read_plain(service) == secret
+
+
+def keychain_read_plain(service):
+    r = _security("find-generic-password", "-s", service, "-a", ACCOUNT, "-w")
+    return r.stdout.strip() if r.returncode == 0 else None
+
+
 CRED_SERVICE_RE = re.compile(r'"svce"<blob>="(Claude Code-credentials[^"]*)"')
 
 
@@ -1776,11 +1797,13 @@ def rename_profile(old, new):
             raise ValueError("no profile named %r" % old)
         if new in profiles():
             raise ValueError("profile %r already exists" % new)
-        for service in (profile_service, api_key_service):
-            secret = keychain_read(service(old))
-            if secret:
-                keychain_write(service(new), secret)
-                keychain_delete(service(old))
+        credentials = keychain_read(profile_service(old))
+        if credentials:
+            keychain_write(profile_service(new), credentials)
+            keychain_delete(profile_service(old))
+        key = api_key(old)
+        if key and keychain_write_plain(api_key_service(new), key):
+            keychain_delete(api_key_service(old))
         os.rename(os.path.dirname(profile_config(old)), os.path.dirname(profile_config(new)))
         with contextlib.suppress(OSError):
             os.unlink(lock_path("refresh-" + old))
@@ -1907,8 +1930,13 @@ def api_key_service(name):
     return "claudini-apikey-" + name
 
 
+API_KEY = re.compile(r"sk-ant-api[A-Za-z0-9_-]+")
+
+
 def api_key(name):
-    return (keychain_read(api_key_service(name)) or {}).get("api_key")
+    # Kept as the bare key rather than JSON, so it can be written without argv.
+    key = keychain_read_plain(api_key_service(name))
+    return key if key and API_KEY.fullmatch(key) else None
 
 
 def probe_verdict(code, body):
@@ -2037,6 +2065,10 @@ def pick_credit(rows):
 def credit_env(base, name, key):
     env = {k: v for k, v in base.items() if k not in CREDIT_CLEARS}
     env.update(ANTHROPIC_API_KEY=key, CLAUDINI_CREDITS=name)
+    # Claude Code keeps the key for its own calls and strips it from what it
+    # starts — Bash, hooks, stdio MCP servers — so a prompt injected through a
+    # page or a mail cannot read it back with `printenv`.
+    env.setdefault("CLAUDE_CODE_SUBPROCESS_ENV_SCRUB", "1")
     return env
 
 
@@ -2053,12 +2085,13 @@ def set_api_key(name, key):
     if name not in profiles():
         raise ValueError("no profile named %r" % name)
     key = key.strip()
-    if not key.startswith("sk-ant-api"):
+    if not API_KEY.fullmatch(key):
         raise ValueError("that is not a Claude API key (they start with sk-ant-api)")
     status, detail = probe(key)
     if status == BAD_KEY:
         raise ValueError("the API refused that key: %s" % detail)
-    keychain_write(api_key_service(name), {"api_key": key})
+    if not keychain_write_plain(api_key_service(name), key):
+        raise ValueError("could not write the key to the keychain")
     mark_credit(name, status, detail)
     return status, detail
 

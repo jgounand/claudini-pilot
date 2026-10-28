@@ -223,7 +223,9 @@ claudini-run --no-fallback claude -p "…"                  # exit 3 instead of 
 
 It sets `ANTHROPIC_API_KEY` to the funded key whose plan renews soonest, clears
 what would route the run elsewhere (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
-cloud provider flags), and runs the command. With no funded key left it runs it
+cloud provider flags), sets `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` so Claude Code
+keeps the key out of the Bash commands and MCP servers it starts, and runs the
+command. With no funded key left it runs it
 unchanged, on the subscription. It refuses an interactive `claude` (no `-p`):
 the credits don't pay for it, and an organization with purchased credits would
 be billed. A failed run is not retried — it may have done half its work — but
@@ -247,7 +249,8 @@ probed with a one-token request to the cheapest model: an empty balance refuses
 it for nothing, a funded one costs a hundredth of a cent. A funded answer stands
 for 15 minutes, an empty one for an hour. The renewal date is estimated from the
 plan's start date (`/api/oauth/profile`), read with the rest of the identity
-once a day. Keys live in the keychain as `claudini-apikey-<name>` and follow a
+once a day. Keys live in the keychain as `claudini-apikey-<name>`, written through
+`security -i` on stdin so they never appear in a process list, and follow a
 profile through `--rename` and `--remove`; probe results are in
 `~/.claudini/credits.json`.
 
