@@ -13,9 +13,12 @@ Usage:
   claudini_usage.py --reconnect <profile>
   claudini_usage.py --auto on|off
   claudini_usage.py --tick        # run one auto-switch decision
+  claudini_usage.py --credits     # each plan's API credits (see API credits)
+  claudini-run COMMAND…           # run COMMAND on the credits that expire soonest
 """
 
 import collections
+import calendar
 import concurrent.futures
 import contextlib
 import datetime as dt
@@ -26,6 +29,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -42,6 +46,8 @@ CACHE_FILE = os.path.join(CLAUDINI_HOME, "usage-cache.json")
 
 USAGE_URL = "https://api.anthropic.com/api/oauth/usage"
 BOOTSTRAP_URL = "https://api.anthropic.com/api/claude_cli/bootstrap"
+PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+MESSAGES_URL = "https://api.anthropic.com/v1/messages"
 # The token endpoint lives on platform.claude.com, not on the API host, and it
 # sits behind Cloudflare: a request without a User-Agent is answered with
 # "error code: 1010" (client banned) long before Anthropic sees it, which reads
@@ -58,7 +64,7 @@ ACCOUNT = getpass.getuser()
 # deadlocks silently, and taking them out of order deadlocks two processes
 # against each other — both are the kind of bug that shows up once a month at
 # a customer's, so the rule is checked rather than described.
-GUARD_ORDER = {"switch": 1, "refresh": 2, "cache": 3, "state": 4, "history": 5}
+GUARD_ORDER = {"switch": 1, "refresh": 2, "cache": 3, "state": 4, "history": 5, "credits": 6}
 HELD = threading.local()
 
 
@@ -666,7 +672,18 @@ def fetch_identity(token):
         "plan": (acct.get("organization_type") or "").replace("claude_", ""),
         "tier": acct.get("organization_rate_limit_tier"),
         "seat": acct.get("seat_tier"),
+        "subscribed_at": subscribed_at(token),
     }
+
+
+def subscribed_at(token):
+    """When the plan started. Its monthly anniversary is when the plan's API
+    credits arrive and the previous month's expire (see API credits)."""
+    try:
+        org = (http_json(PROFILE_URL, token=token) or {}).get("organization") or {}
+    except Exception:
+        return None
+    return org.get("subscription_created_at")
 
 
 # Claude Code caches the usage response it gets into the profile's claude.json
@@ -1759,10 +1776,11 @@ def rename_profile(old, new):
             raise ValueError("no profile named %r" % old)
         if new in profiles():
             raise ValueError("profile %r already exists" % new)
-        credentials = keychain_read(profile_service(old))
-        if credentials:
-            keychain_write(profile_service(new), credentials)
-            keychain_delete(profile_service(old))
+        for service in (profile_service, api_key_service):
+            secret = keychain_read(service(old))
+            if secret:
+                keychain_write(service(new), secret)
+                keychain_delete(service(old))
         os.rename(os.path.dirname(profile_config(old)), os.path.dirname(profile_config(new)))
         with contextlib.suppress(OSError):
             os.unlink(lock_path("refresh-" + old))
@@ -1771,6 +1789,7 @@ def rename_profile(old, new):
             _point_at(new)
             _write_json(CONFIG, dict(_read_json(CONFIG, {}), active_profile=new), indent=2)
         _carry_rotation(old, new)
+        _carry_credits(old, new)
 
 
 def remove_profile(name):
@@ -1780,12 +1799,14 @@ def remove_profile(name):
         if active_profile() == name:
             raise ValueError("%r is in use — switch away from it first" % name)
         keychain_delete(profile_service(name))
+        keychain_delete(api_key_service(name))
         shutil.rmtree(os.path.dirname(profile_config(name)), ignore_errors=True)
         with contextlib.suppress(OSError):
             os.unlink(lock_path("refresh-" + name))
         _CONFIG_CACHE.clear()
         forget(name)
         _carry_rotation(name)
+        _carry_credits(name)
 
 
 def auto_tick(rows=None):
@@ -1847,6 +1868,287 @@ def reconnect(name):
             print("\033[32m%s reconnected%s.\033[0m" % (name, " (%s)" % got if got else ""))
     finally:
         forget(name)
+
+
+# --- API credits -------------------------------------------------------------
+
+# Max and Team plans come with monthly Claude Platform credits, paid into the
+# one Console organization each plan is linked to. They pay for the API, the
+# Agent SDK and `claude -p` run with an API key of that organization — never
+# for interactive Claude Code — and what is left expires with the plan's
+# billing month. So headless work spends them first: unused they are lost, and
+# every run they pay for is one the subscription's limits don't carry.
+#
+# No endpoint tells an API key its balance. A key is probed instead with a
+# one-token request: an empty balance refuses it for nothing, a funded one
+# pays a hundredth of a cent for it.
+
+CREDITS_FILE = os.path.join(CLAUDINI_HOME, "credits.json")
+PROBE_MODEL = "claude-haiku-5-5"   # the cheapest model answers the probe
+FUNDED, EMPTY, BAD_KEY, NO_KEY = "funded", "empty", "bad_key", "no_key"
+CREDIT_TEXT = {FUNDED: "credits left", EMPTY: "spent for this month",
+               BAD_KEY: "key rejected", NO_KEY: "no API key", None: "not checked yet",
+               RATE_LIMITED: "rate limited", UNREACHABLE: "unreachable"}
+# How long a probe's answer stands. A funded key is checked again soon, since
+# a run can empty it; an empty one only has to notice the next month's grant.
+CREDIT_TTL = {FUNDED: 15 * 60, EMPTY: 3600, BAD_KEY: 6 * 3600}
+CREDIT_FAIL_TTL = 5 * 60
+CREDIT_WAIT_DAYS = 7               # a new plan can claim its credits after a week
+# USD a month. A team's pool is claimed by its owner, not by a seat.
+CREDIT_GRANTS = {"max_20x": 200, "max_5x": 100}
+# What would send a keyed run somewhere else: a bearer token outranks an API
+# key in Claude Code, a base URL points it at another backend (a local
+# model's proxy), and a cloud provider flag takes precedence over both.
+CREDIT_CLEARS = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "CLAUDE_CODE_USE_BEDROCK",
+                 "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY")
+
+
+def api_key_service(name):
+    return "claudini-apikey-" + name
+
+
+def api_key(name):
+    return (keychain_read(api_key_service(name)) or {}).get("api_key")
+
+
+def probe_verdict(code, body):
+    """What the answer to a probe says about the key behind it."""
+    if code == 200:
+        return FUNDED, None
+    message = api_message(body) or (body or "").strip()[:200] or None
+    if code == 400 and "credit balance" in (body or "").lower():
+        return EMPTY, message
+    if code in (401, 403):
+        return BAD_KEY, message
+    if code == 429:
+        return RATE_LIMITED, message
+    return UNREACHABLE, "HTTP %d%s" % (code, " " + message if message else "")
+
+
+def probe(key):
+    req = urllib.request.Request(MESSAGES_URL, method="POST", data=json.dumps({
+        "model": PROBE_MODEL, "max_tokens": 1,
+        "messages": [{"role": "user", "content": "ok"}]}).encode())
+    for header, value in (("x-api-key", key), ("anthropic-version", "2023-06-01"),
+                          ("content-type", "application/json"), ("User-Agent", USER_AGENT)):
+        req.add_header(header, value)
+    try:
+        with urllib.request.urlopen(req, timeout=20):
+            return probe_verdict(200, "")
+    except urllib.error.HTTPError as e:
+        return probe_verdict(e.code, (e.read() or b"").decode("utf8", "replace")[:400])
+    except Exception as e:
+        return UNREACHABLE, "unreachable (%s)" % type(e).__name__
+
+
+def _iso(value):
+    try:
+        return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return None
+
+
+def next_grant(subscribed, now):
+    """When the plan's next month of credits arrives — the next monthly
+    anniversary of its start, which is also when this month's expire.
+
+    An estimate: the credits land shortly after the payment goes through, and
+    a plan started on the 31st renews on the last day of shorter months.
+    """
+    start = _iso(subscribed)
+    if not start:
+        return None
+    now = now.astimezone(start.tzinfo)
+    year, month = now.year, now.month
+    for _ in range(2):
+        day = min(start.day, calendar.monthrange(year, month)[1])
+        candidate = start.replace(year=year, month=month, day=day)
+        if candidate > now:
+            return candidate.timestamp()
+        year, month = (year + 1, 1) if month == 12 else (year, month + 1)
+    return None
+
+
+def mark_credit(name, status, detail=None):
+    with guard("credits"):
+        disk = _read_json(CREDITS_FILE, {})
+        disk[name] = {"status": status, "detail": detail, "at": time.time()}
+        _write_json(CREDITS_FILE, disk, indent=2)
+
+
+def _carry_credits(old, new=None):
+    """A renamed profile keeps its last probe; a removed one drops it."""
+    with guard("credits"):
+        disk = _read_json(CREDITS_FILE, {})
+        entry = disk.pop(old, None)
+        if entry and new:
+            disk[new] = entry
+        _write_json(CREDITS_FILE, disk, indent=2)
+
+
+def credit_rows(force=False, probe_due=True):
+    """Every profile's API credit standing, probing the keys whose last answer
+    is out of date — or none, with `probe_due` off: a renderer only shows what
+    is already known."""
+    now = time.time()
+    identities = load_cache()["identity"]
+    with guard("credits"):
+        known = _read_json(CREDITS_FILE, {})
+    rows, due = [], []
+    for name in profiles():
+        info = (identities.get(name) or {}).get("info") or {}
+        tier = _tier_of(info)
+        started = _iso(info.get("subscribed_at"))
+        row = {"name": name, "plan": plan_label(info),
+               "grant": CREDIT_GRANTS.get(tier[0]) if tier else None,
+               "next_grant": next_grant(info.get("subscribed_at"),
+                                        dt.datetime.now(dt.timezone.utc)),
+               "claimable_at": (started + dt.timedelta(days=CREDIT_WAIT_DAYS)).timestamp()
+               if started else None,
+               "status": NO_KEY, "detail": None, "at": None}
+        key = api_key(name)
+        if key:
+            entry = known.get(name) or {"status": None}
+            row.update(entry)
+            ttl = CREDIT_TTL.get(entry["status"], CREDIT_FAIL_TTL)
+            if probe_due and (force or now - entry.get("at", 0) >= ttl):
+                due.append((row, key))
+        rows.append(row)
+    if due:
+        with concurrent.futures.ThreadPoolExecutor(4) as pool:
+            verdicts = list(pool.map(lambda pair: probe(pair[1]), due))
+        with guard("credits"):
+            disk = _read_json(CREDITS_FILE, {})
+            for (row, _), (status, detail) in zip(due, verdicts):
+                row.update(status=status, detail=detail, at=time.time())
+                disk[row["name"]] = {k: row[k] for k in ("status", "detail", "at")}
+            _write_json(CREDITS_FILE, disk, indent=2)
+    return rows
+
+
+def pick_credit(rows):
+    """The funded key to spend first: the one whose credits expire soonest,
+    since whatever is left on it at its plan's anniversary is lost."""
+    funded = [r for r in rows if r["status"] == FUNDED]
+    return min(funded, key=lambda r: (r["next_grant"] or float("inf"), r["name"]),
+               default=None)
+
+
+def credit_env(base, name, key):
+    env = {k: v for k, v in base.items() if k not in CREDIT_CLEARS}
+    env.update(ANTHROPIC_API_KEY=key, CLAUDINI_CREDITS=name)
+    return env
+
+
+def interactive_claude(argv):
+    """A `claude` that would open a session in the terminal. The credits don't
+    pay for those: Claude Code answers "Credit balance too low", or spends the
+    organization's purchased credits if it has any."""
+    return (os.path.basename(argv[0]) == "claude"
+            and not any(a in ("-p", "--print") for a in argv[1:]))
+
+
+def set_api_key(name, key):
+    """File a profile's API key, once the API has said it knows it."""
+    if name not in profiles():
+        raise ValueError("no profile named %r" % name)
+    key = key.strip()
+    if not key.startswith("sk-ant-api"):
+        raise ValueError("that is not a Claude API key (they start with sk-ant-api)")
+    status, detail = probe(key)
+    if status == BAD_KEY:
+        raise ValueError("the API refused that key: %s" % detail)
+    keychain_write(api_key_service(name), {"api_key": key})
+    mark_credit(name, status, detail)
+    return status, detail
+
+
+def forget_api_key(name):
+    keychain_delete(api_key_service(name))
+    _carry_credits(name)
+
+
+def _say(message):
+    print("\033[2mclaudini-run: %s\033[0m" % message, file=sys.stderr)
+
+
+def run_on_credits(argv, fallback=True):
+    """`claudini-run COMMAND…` — run it on the API credits that expire soonest,
+    or on the subscription when none are left. Returns its exit code.
+
+    The command is not retried when it fails: it may have done half its work.
+    The key it ran on is probed again instead, so the next run moves on if
+    the credits ran out under it.
+    """
+    if interactive_claude(argv):
+        raise SystemExit("API credits don't pay for interactive Claude Code: "
+                         "add -p, or start it without claudini-run")
+    rows = credit_rows()
+    chosen = pick_credit(rows)
+    env = dict(os.environ)
+    if chosen:
+        key = api_key(chosen["name"])
+        env = credit_env(env, chosen["name"], key)
+        _say("on %s's API credits" % chosen["name"])
+    else:
+        why = ("no API credits left on any account" if any(r["status"] != NO_KEY for r in rows)
+               else "no API key filed yet (claudini-usage --credits)")
+        if not fallback:
+            _say(why)
+            return 3
+        _say(why + " — on the subscription")
+    try:
+        proc = subprocess.Popen(argv, env=env)
+    except OSError as e:
+        _say("cannot run %s (%s)" % (argv[0], e.strerror))
+        return 127
+    # Ctrl-C reaches the command through the terminal; we just wait for it.
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    code = proc.wait()
+    if chosen and code != 0:
+        status, detail = probe(key)
+        mark_credit(chosen["name"], status, detail)
+        if status != FUNDED:
+            _say("%s: %s — the next run moves on" % (chosen["name"], CREDIT_TEXT[status]))
+    return 128 - code if code < 0 else code
+
+
+def credits_line(rows):
+    """One line for the usage table, once at least one key is filed."""
+    if not any(r["status"] != NO_KEY for r in rows):
+        return None
+    counts = collections.Counter(r["status"] for r in rows)
+    parts = ["%d %s" % (n, CREDIT_TEXT[status]) for status, n in counts.most_common()]
+    chosen = pick_credit(rows)
+    return "API credits: %s%s — claudini-usage --credits" % (
+        " · ".join(parts), ", next headless run on %s" % chosen["name"] if chosen else "")
+
+
+def render_credits(rows):
+    chosen = pick_credit(rows)
+    print("\033[1mAPI credits\033[0m — `claudini-run` spends them on headless work "
+          "(claude -p, Agent SDK, API), soonest-expiring first")
+    print()
+    now = time.time()
+    for r in rows:
+        mark = "●" if chosen and r["name"] == chosen["name"] else "○"
+        grant = "$%d/mo" % r["grant"] if r["grant"] else "team pool" if "team" in r["plan"] else ""
+        colour = {FUNDED: "\033[32m", EMPTY: "\033[33m", BAD_KEY: "\033[31m"}.get(r["status"], "\033[2m")
+        line = "%s %-17s %-9s %-9s %s%-20s\033[0m" % (mark, r["name"], r["plan"], grant, colour,
+                                                       CREDIT_TEXT[r["status"]])
+        if r["next_grant"]:
+            line += "  renews in %s" % until(int(r["next_grant"] - now))
+        if r["at"]:
+            line += "  \033[2m· checked %s\033[0m" % ago(int(now - r["at"]))
+        print(line)
+        if r["detail"] and r["status"] not in (FUNDED, EMPTY):
+            print("    \033[2m%s\033[0m" % r["detail"])
+    keyless = [r for r in rows if r["status"] == NO_KEY and r["grant"]]
+    if keyless:
+        print()
+        print("\033[2mTo add one: on claude.ai › Settings › Billing › API credits, link a Console\n"
+              "organization (one per plan, and the link is final), create an API key in it,\n"
+              "then `claudini-usage --api-key NAME` and paste the key.\033[0m")
 
 
 # --- rendering ---------------------------------------------------------------
@@ -1946,6 +2248,9 @@ def render(rows, plan=None):
             print("    Extra credits            %s / %s %s"
                   % (e["used"], e["limit"], e["currency"] or ""))
         print()
+    line = credits_line(credit_rows(probe_due=False))
+    if line:
+        print("\033[2m%s\033[0m" % line)
 
 
 SHORT_LABELS = {"session": "5h", "weekly_all": "7d"}
@@ -2072,6 +2377,64 @@ def actions_json():
 def main():
     args = sys.argv[1:]
     command = args[0] if args else None
+
+    # `claudini-run [--no-fallback] [--] COMMAND…`, the same file under another name.
+    if os.path.basename(sys.argv[0]) == "claudini-run":
+        fallback = "--no-fallback" not in args[:1]
+        args = args[0 if fallback else 1:]
+        args = args[1:] if args[:1] == ["--"] else args
+        if not args:
+            sys.exit("usage: claudini-run [--no-fallback] COMMAND [ARGS…]")
+        sys.exit(run_on_credits(args, fallback))
+
+    if command == "--api-key":                   # --api-key NAME, the key on stdin
+        if len(args) < 2:
+            sys.exit("usage: claudini-usage --api-key NAME   (paste the key when asked)")
+        # Read, never taken from the command line: argv is visible to every process.
+        key = (getpass.getpass("API key for %s: " % args[1]) if sys.stdin.isatty()
+               else sys.stdin.read())
+        try:
+            status, detail = set_api_key(args[1], key)
+        except ValueError as e:
+            sys.exit(str(e))
+        print("%s: key filed — %s" % (args[1], CREDIT_TEXT[status]))
+        return
+
+    if command == "--forget-key":
+        if len(args) < 2 or args[1] not in profiles():
+            sys.exit("no profile named %r" % (args[1] if len(args) > 1 else ""))
+        forget_api_key(args[1])
+        print("%s: API key removed" % args[1])
+        return
+
+    if command == "--credits":                   # table, or --json
+        rows = credit_rows("--force" in args)
+        if "--json" in args:
+            json.dump({"profiles": rows, "next": (pick_credit(rows) or {}).get("name")}, sys.stdout)
+        else:
+            render_credits(rows)
+        return
+
+    if command == "--credit-pick":               # for programs: which key to run on
+        chosen = pick_credit(credit_rows())
+        if "--json" in args:
+            json.dump({"profile": chosen["name"] if chosen else None,
+                       "api_key": api_key(chosen["name"]) if chosen else None,
+                       "next_grant": chosen["next_grant"] if chosen else None}, sys.stdout)
+            return
+        if not chosen:
+            sys.exit(3)
+        print(chosen["name"])
+        return
+
+    if command == "--credit-recheck":            # --credit-recheck NAME, after a failed run
+        key = api_key(args[1]) if len(args) > 1 else None
+        if not key:
+            sys.exit("no API key filed for %r" % (args[1] if len(args) > 1 else ""))
+        status, detail = probe(key)
+        mark_credit(args[1], status, detail)
+        print("%s: %s" % (args[1], CREDIT_TEXT[status]))
+        return
 
     if command == "--switch":
         try:

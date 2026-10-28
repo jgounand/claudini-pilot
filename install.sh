@@ -34,7 +34,8 @@ ln -sfn "$REPO/src/claudini_auto.py"  "$TOOLS/claudini_auto.py"
 ln -sfn "$REPO/src/claudini_history.py" "$TOOLS/claudini_history.py"
 ln -sfn "$REPO/src/claudini_usage.py" "$BIN/claudini-usage"
 ln -sfn "$REPO/src/claudini_auto.py"  "$BIN/claudini-auto"
-echo "commands   -> $BIN/claudini-usage, $BIN/claudini-auto"
+ln -sfn "$REPO/src/claudini_usage.py" "$BIN/claudini-run"
+echo "commands   -> $BIN/claudini-usage, $BIN/claudini-auto, $BIN/claudini-run"
 
 # The app, with its widget when this Mac can sign one: that takes Xcode and an
 # "Apple Development" certificate (free with any Apple ID, from Xcode >

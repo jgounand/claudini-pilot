@@ -203,6 +203,59 @@ another wall.
 Availability is decided server-side; this only reports what your client was
 told. It cannot grant the command on an account that does not have it.
 
+## API credits for headless work
+
+Max and Team plans come with monthly API credits ($200 on Max 20x, $100 on Max
+5x, a pooled amount on Team) paid into one Claude Console organization per plan.
+They pay for the API, the Agent SDK and `claude -p` run with an **API key of that
+organization** — not for interactive Claude Code — and what a month leaves
+expires at the plan's billing anniversary. So headless work should spend them
+first: unused they are lost, and every run they pay for is one the
+subscription's limits don't carry.
+
+`claudini-run` does that:
+
+```sh
+claudini-run claude -p "summarise yesterday's commits"   # on the credits that expire soonest
+claudini-run python3 my_agent.py                           # anything that reads ANTHROPIC_API_KEY
+claudini-run --no-fallback claude -p "…"                  # exit 3 instead of using the subscription
+```
+
+It sets `ANTHROPIC_API_KEY` to the funded key whose plan renews soonest, clears
+what would route the run elsewhere (`ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`,
+cloud provider flags), and runs the command. With no funded key left it runs it
+unchanged, on the subscription. It refuses an interactive `claude` (no `-p`):
+the credits don't pay for it, and an organization with purchased credits would
+be billed. A failed run is not retried — it may have done half its work — but
+its key is checked again, so the next run moves on if the credits ran out.
+
+**Setting it up, once per plan.** On claude.ai › Settings › Billing › API
+credits, link a Console organization (each plan links to one organization, each
+organization takes one plan, and only support can change the link), create an
+API key in it, then file it:
+
+```sh
+claudini-usage --api-key NAME      # paste the key when asked; it never goes on the command line
+claudini-usage --credits           # every plan: credits left, spent, no key; when it renews
+```
+
+Link organizations that hold no purchased credits and no auto-reload, or
+`claudini-run` will go on spending those once the included ones are gone.
+
+**How it knows.** No endpoint tells an API key its balance, so each key is
+probed with a one-token request to the cheapest model: an empty balance refuses
+it for nothing, a funded one costs a hundredth of a cent. A funded answer stands
+for 15 minutes, an empty one for an hour. The renewal date is estimated from the
+plan's start date (`/api/oauth/profile`), read with the rest of the identity
+once a day. Keys live in the keychain as `claudini-apikey-<name>` and follow a
+profile through `--rename` and `--remove`; probe results are in
+`~/.claudini/credits.json`.
+
+For programs that start `claude -p` themselves, `claudini-usage --credit-pick
+--json` answers `{"profile", "api_key", "next_grant"}` (nulls when none is
+funded), and `claudini-usage --credit-recheck NAME` re-probes a key after a run
+failed with "credit balance is too low".
+
 ## When an account cannot be read
 
 Not every failure is a credentials problem, and the tool says which is which
@@ -341,6 +394,10 @@ claudini-usage --auto on|off   # arm or disarm auto-switching
 claudini-usage --mode model|endurance   # which goal the policy optimises for
 claudini-usage --drain on|off           # past the line everywhere: spend the rest
 claudini-usage --tick          # run one auto-switch decision now
+claudini-usage --api-key NAME  # file the API key of the plan's linked Console organization
+claudini-usage --forget-key NAME
+claudini-usage --credits [--force] [--json]  # API credits per plan
+claudini-run COMMAND…          # run COMMAND on the API credits that expire soonest
 claudini-auto                  # the console: a auto · m mode · r refresh · 1-9 switch · q quit
 ```
 

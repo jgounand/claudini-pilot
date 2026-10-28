@@ -923,5 +923,113 @@ class SwitchingByHand(unittest.TestCase):
                          {"from": "big", "to": "small", "why": "chosen by hand"})
 
 
+class ApiCredits(unittest.TestCase):
+    """Which key headless work spends, and what a probe's answer means."""
+
+    def test_probe_answers(self):
+        self.assertEqual(cu.probe_verdict(200, ""), (cu.FUNDED, None))
+        empty = json.dumps({"type": "error", "error": {
+            "type": "invalid_request_error",
+            "message": "Your credit balance is too low to access the Anthropic API."}})
+        self.assertEqual(cu.probe_verdict(400, empty)[0], cu.EMPTY)
+        self.assertEqual(cu.probe_verdict(400, '{"error": {"message": "max_tokens: bad"}}')[0],
+                         cu.UNREACHABLE)
+        self.assertEqual(cu.probe_verdict(401, '{"error": {"message": "invalid x-api-key"}}'),
+                         (cu.BAD_KEY, "invalid x-api-key"))
+        self.assertEqual(cu.probe_verdict(429, "")[0], cu.RATE_LIMITED)
+        self.assertEqual(cu.probe_verdict(529, "")[0], cu.UNREACHABLE)
+
+    def test_next_grant_is_the_monthly_anniversary(self):
+        start = "2026-08-31T11:20:39.579029Z"
+        at = lambda *a: dt.datetime(*a, tzinfo=dt.timezone.utc)
+        grant = lambda now: dt.datetime.fromtimestamp(cu.next_grant(start, now), dt.timezone.utc)
+        self.assertEqual(grant(at(2026, 10, 28)).date(), dt.date(2026, 10, 31))
+        # Past this month's: next month's, on its last day when it is shorter.
+        self.assertEqual(grant(at(2026, 10, 31, 12)).date(), dt.date(2026, 11, 30))
+        self.assertEqual(grant(at(2027, 2, 1)).date(), dt.date(2027, 2, 28))
+        self.assertEqual(grant(at(2026, 12, 31, 12)).date(), dt.date(2027, 1, 31))
+        self.assertIsNone(cu.next_grant(None, at(2026, 10, 28)))
+
+    def test_spends_what_expires_first(self):
+        row = lambda name, status, grant_in: {"name": name, "status": status,
+                                              "next_grant": grant_in and NOW.timestamp() + grant_in}
+        rows = [row("late", cu.FUNDED, 20 * 86400), row("soon", cu.FUNDED, 2 * 86400),
+                row("sooner-but-empty", cu.EMPTY, 3600), row("bad", cu.BAD_KEY, 60),
+                row("undated", cu.FUNDED, None), row("keyless", cu.NO_KEY, 60)]
+        self.assertEqual(cu.pick_credit(rows)["name"], "soon")
+        # An unknown date goes last, not first.
+        self.assertEqual(cu.pick_credit([rows[4], rows[0]])["name"], "late")
+        self.assertIsNone(cu.pick_credit([rows[2], rows[3], rows[5]]))
+
+    def test_only_headless_claude_runs_on_credits(self):
+        self.assertTrue(cu.interactive_claude(["claude"]))
+        self.assertTrue(cu.interactive_claude(["/opt/bin/claude", "--resume", "x"]))
+        self.assertFalse(cu.interactive_claude(["claude", "-p", "hello"]))
+        self.assertFalse(cu.interactive_claude(["claude", "--model", "opus", "--print"]))
+        self.assertFalse(cu.interactive_claude(["python3", "agent.py"]))
+
+    def test_a_keyed_run_cannot_be_routed_elsewhere(self):
+        env = cu.credit_env({"PATH": "/bin", "ANTHROPIC_AUTH_TOKEN": "gateway-token",
+                             "ANTHROPIC_BASE_URL": "http://127.0.0.1:8799",
+                             "CLAUDE_CODE_USE_BEDROCK": "1"}, "soon", "sk-ant-api-x")
+        self.assertEqual(env, {"PATH": "/bin", "ANTHROPIC_API_KEY": "sk-ant-api-x",
+                               "CLAUDINI_CREDITS": "soon"})
+
+
+class CreditProbing(unittest.TestCase):
+    """Probes go to the keys that are due, and nowhere else."""
+
+    def setUp(self):
+        self.home = tempfile.mkdtemp()
+        self.saved = {k: getattr(cu, k) for k in
+                      ("CLAUDINI_HOME", "CREDITS_FILE", "profiles", "api_key", "probe", "load_cache")}
+        cu.CLAUDINI_HOME = self.home
+        cu.CREDITS_FILE = os.path.join(self.home, "credits.json")
+        keys = {"fresh": "sk-ant-api-fresh", "stale": "sk-ant-api-stale", "new": "sk-ant-api-new"}
+        cu.profiles = lambda: ["fresh", "keyless", "new", "stale"]
+        cu.api_key = keys.get
+        self.probed = []
+        cu.probe = lambda key: self.probed.append(key) or (cu.EMPTY, "too low")
+        cu.load_cache = lambda: {"identity": {"fresh": {"info": {
+            "tier": "default_claude_max_20x", "subscribed_at": "2026-08-31T11:20:00Z"}}}}
+        now = cu.time.time()
+        cu._write_json(cu.CREDITS_FILE, {
+            "fresh": {"status": cu.FUNDED, "detail": None, "at": now - 60},
+            "stale": {"status": cu.FUNDED, "detail": None, "at": now - 3600}})
+
+    def tearDown(self):
+        for k, v in self.saved.items():
+            setattr(cu, k, v)
+        shutil.rmtree(self.home, ignore_errors=True)
+
+    def test_probes_only_what_is_due(self):
+        rows = {r["name"]: r for r in cu.credit_rows()}
+        self.assertEqual(sorted(self.probed), ["sk-ant-api-new", "sk-ant-api-stale"])
+        self.assertEqual(rows["fresh"]["status"], cu.FUNDED)
+        self.assertEqual(rows["fresh"]["grant"], 200)
+        self.assertIsNotNone(rows["fresh"]["next_grant"])
+        self.assertEqual(rows["keyless"]["status"], cu.NO_KEY)
+        self.assertEqual(rows["stale"]["status"], cu.EMPTY)
+        self.assertEqual(cu._read_json(cu.CREDITS_FILE, {})["new"]["status"], cu.EMPTY)
+
+    def test_a_renderer_never_probes(self):
+        rows = {r["name"]: r for r in cu.credit_rows(probe_due=False)}
+        self.assertEqual(self.probed, [])
+        self.assertIsNone(rows["new"]["status"])
+        self.assertIn("next headless run on fresh", cu.credits_line(list(rows.values())))
+
+    def test_force_probes_every_key(self):
+        cu.credit_rows(force=True)
+        self.assertEqual(len(self.probed), 3)
+
+    def test_renaming_keeps_the_last_probe(self):
+        cu._carry_credits("fresh", "renamed")
+        disk = cu._read_json(cu.CREDITS_FILE, {})
+        self.assertNotIn("fresh", disk)
+        self.assertEqual(disk["renamed"]["status"], cu.FUNDED)
+        cu._carry_credits("renamed")
+        self.assertNotIn("renamed", cu._read_json(cu.CREDITS_FILE, {}))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
