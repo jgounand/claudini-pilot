@@ -76,8 +76,36 @@ struct Action: Decodable {
     let about: String
 }
 
+/// The fleet in figures, for the panel's tiles. Optional on the Swift side so
+/// a snapshot written by an older engine still decodes.
+struct FleetSummary: Decodable {
+    let usable: Int
+    let total: Int
+    let off: Int
+    let draining: Bool
+    /// Weekly allowance left, added up: 100 is one untouched account's week.
+    let weekly_reserve: Int
+    let next_free: NextFree?
+}
+
+/// The spent account that comes back first, and when (a clock time).
+struct NextFree: Decodable {
+    let name: String
+    let at_epoch: Int?
+}
+
+/// The policy settings the settings window shows and changes.
+struct PolicySettings: Decodable {
+    let max_usage: Int
+    let cooldown_min: Int
+    let drain: Bool
+    let preferred_model: String
+}
+
 struct Snapshot: Decodable {
     let profiles: [Profile]
+    let summary: FleetSummary?
+    let settings: PolicySettings?
     let auto: Bool
     /// One line on whether the fleet as a whole is heading for an outage.
     let fleet: String

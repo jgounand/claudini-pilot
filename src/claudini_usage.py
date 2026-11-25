@@ -240,6 +240,11 @@ DEFAULT_STATE = {
     "disabled": [],
 }
 
+# The settings `--set` may change, with the range each accepts. Below 50% an
+# account would be called spent with half its allowance unused; a cooldown
+# beyond two hours would outlast most five-hour windows' usefulness.
+SETTABLE = {"max_usage": (50, 100), "cooldown_min": (0, 120)}
+
 CACHE_VERSION = 7
 
 
@@ -395,6 +400,104 @@ def read_history():
     return [e for e in entries if e.get("at", 0) >= cutoff]
 
 
+# The long-term summary. history.jsonl keeps 30 days of every reading; this
+# keeps, for good, what week-by-week charts need: per day and per account, the
+# weekly points spent and the highest figure seen, and every finished week with
+# how much of it was used. About a kilobyte a day.
+RESET_DROP = 15        # a weekly figure falling this far means the week reset
+
+
+def rollup_file():
+    """Beside the readings, wherever they are — tests move HISTORY_FILE, and a
+    summary left behind in the real folder would collect their made-up accounts."""
+    return os.path.join(os.path.dirname(HISTORY_FILE), "history-daily.json")
+
+
+# A week cannot reset twice in five days. A fall that soon after a reset is a
+# reading of something else — a profile that briefly pointed at another
+# workspace, a glitch — and counting it as a new week then counted the climb
+# back as spending, which is how one account "spent" 322% of a week.
+MIN_WEEK_SEC = 5 * 86400
+
+
+def empty_rollup():
+    return {"version": 2, "accounts": {}, "days": {}, "cycles": []}
+
+
+def roll_up(rollup, at, name, weekly, tier=None, seat=None):
+    """Fold one weekly reading into the summary, and return it.
+
+    The weekly figure only grows until its reset, so spending is what it gains
+    above the highest point of the week, and a fall of RESET_DROP below that
+    point closes the week — at that point, which is what the week used. What
+    the new week already shows is spent since. An account's first reading sets
+    a baseline and counts nothing; a reading not newer than the last is ignored.
+    """
+    account = rollup["accounts"].get(name)
+    if account is not None and at <= account["last_at"]:
+        return rollup
+    day = dt.datetime.fromtimestamp(at).strftime("%Y-%m-%d")
+    cell = rollup["days"].setdefault(day, {}).setdefault(name, {"used": 0, "max": 0, "seen": 0})
+    cell["seen"] += 1
+    cell["max"] = max(cell["max"], weekly)
+    if account is None:
+        account = rollup["accounts"][name] = {"last": weekly, "last_at": at, "peak": weekly,
+                                              "reset_at": None}
+    else:
+        peak = account["peak"]
+        if weekly < peak - RESET_DROP:
+            if account.get("reset_at") is None or at - account["reset_at"] >= MIN_WEEK_SEC:
+                rollup["cycles"].append({"name": name, "end": account["last_at"], "used_pct": peak,
+                                         "tier": account.get("tier"), "seat": account.get("seat")})
+                account["peak"], account["reset_at"] = weekly, at
+                cell["used"] += weekly
+        elif weekly > peak:
+            if weekly - peak < 60:
+                cell["used"] += weekly - peak
+            account["peak"] = weekly
+        account["last"], account["last_at"] = weekly, at
+    if tier:
+        account["tier"] = tier
+    if seat:
+        account["seat"] = seat
+    return rollup
+
+
+def _weekly_of(point):
+    return point.get("weekly_all")
+
+
+def rebuild_rollup(entries=None):
+    """The summary worked out again from the 30 days of readings still kept."""
+    rollup = empty_rollup()
+    for entry in entries if entries is not None else read_history():
+        for name, point in entry.get("usage", {}).items():
+            if _weekly_of(point) is not None:
+                roll_up(rollup, point.get("at") or entry["at"], name, _weekly_of(point))
+    return rollup
+
+
+def load_rollup():
+    """The summary on disk — built from the readings the first time."""
+    rollup = _read_json(rollup_file(), None)
+    if not isinstance(rollup, dict) or rollup.get("version") != 2:
+        rollup = rebuild_rollup()
+    return rollup
+
+
+def update_rollup(rows):
+    """Fold the rows just sampled into the summary on disk."""
+    with guard("history"):
+        rollup = load_rollup()
+        now = int(dt.datetime.now().timestamp())
+        for r in rows:
+            weekly = next((l["percent"] for l in r["limits"] if l["kind"] == "weekly_all"), None)
+            if weekly is not None:
+                roll_up(rollup, int(r.get("read_at") or now), r["name"], weekly,
+                        r.get("tier"), r.get("seat"))
+        _write_json(rollup_file(), rollup)
+
+
 def last_sample_at():
     """When we last recorded a picture, from the tail of the log.
 
@@ -433,6 +536,7 @@ def record_usage(rows):
 
     record({"usage": {r["name"]: sample(r) for r in fresh},
             "active": (active_row(rows) or {}).get("name")})
+    update_rollup(fresh)
 
 
 def forget(name):
@@ -2333,6 +2437,8 @@ def for_json(rows, state, plan=None):
     pause = throttled_for()
     put_off = staying(rows, (target, why, blocked))
     preferred = {r["name"]: preferred_limit(r) for r in rows}
+    summary = fleet(rows, state)
+    waiting = summary["next_free"]
     return {
         "profiles": [{
             "name": r["name"],
@@ -2371,7 +2477,27 @@ def for_json(rows, state, plan=None):
         } for r in ranked(rows, state)],
         "auto": state["enabled"],
         "actions": actions_json(),
-        "fleet": fleet_line(fleet(rows, state)),
+        "fleet": fleet_line(summary),
+        # The same facts, as figures: the panel draws them as tiles. The time an
+        # account frees up is a clock time, so a snapshot read later stays true.
+        "summary": {
+            "usable": summary["usable"],
+            "total": summary["total"],
+            "off": summary["off"],
+            "draining": summary["draining"],
+            "weekly_reserve": summary["weekly_reserve"],
+            "next_free": ({"name": waiting["name"],
+                           "at_epoch": (int(time.time()) + waiting["in_sec"]
+                                        if waiting["in_sec"] is not None else None)}
+                          if waiting else None),
+        },
+        # What the settings window shows and changes (--set, --drain).
+        "settings": {
+            "max_usage": state["max_usage"],
+            "cooldown_min": state["cooldown_min"],
+            "drain": state.get("drain", True),
+            "preferred_model": PREFERRED_MODEL,
+        },
         "mode": state["mode"],
         "modes": [{"name": m, "title": mode_title(m)} for m in MODES],
         "drain": state.get("drain", True),
@@ -2408,8 +2534,11 @@ ACTIONS = [
     ("--auto on|off", "arm or disarm automatic switching"),
     ("--mode model|endurance", "which goal the policy optimises for"),
     ("--drain on|off", "once every account is past the line, spend what is left above it"),
+    ("--set max_usage|cooldown_min N", "count an account as spent at N%, or wait N minutes between switches"),
     ("--tick", "run one auto-switch decision now"),
     ("--history", "write and open the usage history page"),
+    ("--dashboard-json", "capacity forecast, resets and unused allowance, for the dashboard"),
+    ("--record", "read every account and log it, without switching (for the background recorder)"),
     ("--actions", "this list, as JSON"),
 ]
 
@@ -2504,6 +2633,21 @@ def main():
         subprocess.run(["/usr/bin/open", path])
         return
 
+    if command == "--record":                    # read and log, nothing else
+        # For the background recorder: the readings and the daily summary are
+        # written by collect() itself, at most every HISTORY_GAP. No switching.
+        collect()
+        return
+
+    if command == "--dashboard-json":            # what the dashboard window draws
+        beside = os.path.join(os.path.dirname(os.path.realpath(__file__)),
+                              "claudini_history.py")
+        spec = importlib.util.spec_from_file_location("claudini_history", beside)
+        page = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(page)
+        json.dump(page.dashboard(collect(), load_state(), read_history()), sys.stdout)
+        return
+
     if command == "--actions":
         json.dump(actions_json(), sys.stdout)
         return
@@ -2567,6 +2711,23 @@ def main():
             json.dump(for_json(collect(), state), sys.stdout)
             return
         print("drain: %s" % ("on" if state.get("drain", True) else "off"))
+        return
+
+    if command == "--set":                       # --set max_usage 90
+        if len(args) < 3 or args[1] not in SETTABLE:
+            sys.exit("usage: --set %s VALUE" % "|".join(SETTABLE))
+        low, high = SETTABLE[args[1]]
+        try:
+            value = int(args[2])
+        except ValueError:
+            value = None
+        if value is None or not low <= value <= high:
+            sys.exit("%s must be a whole number from %d to %d" % (args[1], low, high))
+        state = update_state(**{args[1]: value})
+        if "--json" in args:
+            json.dump(for_json(collect(), state), sys.stdout)
+            return
+        print("%s: %d" % (args[1], value))
         return
 
     if command == "--tick":                      # one decision, on its own

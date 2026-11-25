@@ -662,6 +662,21 @@ class Contract(unittest.TestCase):
         self.assertTrue(snap["profiles"][0]["active"])
         self.assertEqual(snap["profiles"][-1]["name"], "broken")
 
+    def test_the_panel_gets_the_fleet_as_figures(self):
+        snap = self.snapshot()
+        for key in ("usable", "total", "off", "draining", "weekly_reserve", "next_free"):
+            self.assertIn(key, snap["summary"], key)
+        self.assertEqual(snap["summary"]["total"], 3)
+        self.assertEqual(snap["settings"], {"max_usage": 95, "cooldown_min": 10, "drain": True,
+                                            "preferred_model": cu.PREFERRED_MODEL})
+
+    def test_next_free_is_a_clock_time(self):
+        """A snapshot read later must still say when, not "in 4h" from then."""
+        rows = [account("here", session=99, active=True), account("other", session=98)]
+        waiting = self.snapshot(rows)["summary"]["next_free"]
+        self.assertIsNotNone(waiting)
+        self.assertGreater(waiting["at_epoch"], NOW.timestamp())
+
     def test_a_supplied_plan_is_not_recomputed(self):
         rows = [account("here", active=True), account("other", session=40)]
         plan = (rows[1], "because I said so", None)
@@ -670,6 +685,31 @@ class Contract(unittest.TestCase):
 
 
 class Settings(unittest.TestCase):
+    def run_set(self, *args):
+        """--set through main(), against a throwaway state file."""
+        original = cu.STATE_FILE
+        cu.STATE_FILE = os.path.join(HERE, "state-under-test.json")
+        argv, sys.argv = sys.argv, ["claudini-usage", "--set", *args]
+        try:
+            with contextlib.redirect_stdout(io.StringIO()):
+                cu.main()
+            return cu.load_state()
+        finally:
+            sys.argv = argv
+            if os.path.exists(cu.STATE_FILE):
+                os.remove(cu.STATE_FILE)
+            cu.STATE_FILE = original
+
+    def test_set_changes_a_setting(self):
+        self.assertEqual(self.run_set("max_usage", "90")["max_usage"], 90)
+        self.assertEqual(self.run_set("cooldown_min", "0")["cooldown_min"], 0)
+
+    def test_set_refuses_what_it_does_not_know_or_cannot_mean(self):
+        for args in (("enabled", "1"), ("max_usage", "30"), ("max_usage", "ninety"),
+                     ("cooldown_min", "500"), ("max_usage",)):
+            with self.assertRaises(SystemExit, msg=args):
+                self.run_set(*args)
+
     def test_the_old_margin_wording_is_converted(self):
         """A config written before the rename still means what it meant."""
         original = cu.STATE_FILE

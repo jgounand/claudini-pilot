@@ -5,16 +5,20 @@ import AppKit
 import SwiftUI
 import WidgetKit
 
-final class Bar: NSObject, NSMenuDelegate {
+final class Bar: NSObject {
     let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     var snapshot: Snapshot?
     var loadedAt = Date.distantPast
-    var busy = false
+    var busy = false { didSet { model.busy = busy } }
     var timer: Timer?
-    var menuOpen = false
+    let model = PanelModel()
+    let popover = NSPopover()
+    var settingsWindow: NSWindow?
+    var dashboardWindow: NSWindow?
+    let dashboard = DashboardModel()
 
-    /// `live: false` builds rows and nothing else — no engine, no timer, no
-    /// requests carried out — for drawing the menu into a picture.
+    /// `live: false` builds the panel and nothing else — no engine, no timer,
+    /// no requests carried out — for drawing it into a picture.
     init(live: Bool = true) {
         super.init()
         // Start on the right, near the clock. On a notched laptop macOS hides
@@ -24,14 +28,124 @@ final class Bar: NSObject, NSMenuDelegate {
         UserDefaults.standard.register(defaults: ["NSStatusItem Preferred Position ClaudiniBar": 260])
         item.autosaveName = "ClaudiniBar"
         item.button?.title = "◌"
-        let menu = NSMenu()
-        menu.delegate = self
-        item.menu = menu
+        wire()
         guard live else { return }
+        // A click opens the panel; a right-click, the few things you might want
+        // without it.
+        item.button?.target = self
+        item.button?.action = #selector(clicked(_:))
+        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        popover.behavior = .transient
+        popover.animates = false
+        let host = NSHostingController(rootView: PanelView(model: model))
+        host.sizingOptions = [.preferredContentSize]
+        popover.contentViewController = host
         reload()
         schedule(defaultPoll)
         watchRequests()
         watchProfiles()
+    }
+
+    /// What the panel's and the settings window's controls do.
+    func wire() {
+        model.onSwitch = { [weak self] in self?.switchTo($0) }
+        model.onRotation = { [weak self] in self?.setInRotation($0, $1) }
+        model.onReconnect = { [weak self] in self?.reconnect($0) }
+        model.onRefresh = { [weak self] in self?.reload(force: true) }
+        model.onAuto = { [weak self] on in self?.command(["--auto", on ? "on" : "off", "--json"]) }
+        model.onMode = { [weak self] in self?.command(["--mode", $0, "--json"]) }
+        model.onDrain = { [weak self] on in self?.command(["--drain", on ? "on" : "off", "--json"]) }
+        model.onSet = { [weak self] key, value in self?.command(["--set", key, String(value), "--json"]) }
+        model.onRename = { [weak self] in self?.rename($0, $1) }
+        model.onRemove = { [weak self] in self?.remove($0) }
+        model.onAdd = { [weak self] in self?.addAccount() }
+        model.onHistory = { [weak self] in self?.showDashboard() }
+        dashboard.onRefresh = { [weak self] in self?.loadDashboard() }
+        model.onSettings = { [weak self] in self?.showSettings() }
+        model.onQuit = { NSApp.terminate(nil) }
+        model.onMenuBarStyle = { [weak self] in self?.paint() }
+    }
+
+    @objc func clicked(_ sender: NSStatusBarButton) {
+        if NSApp.currentEvent?.type == .rightMouseUp {
+            showQuickMenu()
+        } else {
+            togglePanel()
+        }
+    }
+
+    func togglePanel() {
+        if popover.isShown {
+            popover.performClose(nil)
+            return
+        }
+        guard let button = item.button else { return }
+        NSApp.activate(ignoringOtherApps: true)
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        // The panel is drawn from the snapshot we already have; only ask the
+        // engine again when that snapshot has actually gone stale — the poll
+        // period, not the cache TTL, or every opening would sweep the API.
+        let due = TimeInterval(snapshot?.poll_after_sec ?? Int(defaultPoll))
+        if Date().timeIntervalSince(loadedAt) > due { reload() }
+    }
+
+    func closePanel() {
+        if popover.isShown { popover.performClose(nil) }
+    }
+
+    func showQuickMenu() {
+        let menu = NSMenu()
+        for (title, selector, key) in [("Refresh now", #selector(refreshNow), "r"),
+                                       ("Dashboard…", #selector(openDashboard), "d"),
+                                       ("Settings…", #selector(openSettings), ","),
+                                       ("History page (browser)…", #selector(openHistory), "")] {
+            let entry = NSMenuItem(title: title, action: selector, keyEquivalent: key)
+            entry.target = self
+            menu.addItem(entry)
+        }
+        menu.addItem(.separator())
+        let quit = NSMenuItem(title: "Quit claudini-pilot", action: #selector(quitApp), keyEquivalent: "q")
+        quit.target = self
+        menu.addItem(quit)
+        item.menu = menu
+        item.button?.performClick(nil)
+        item.menu = nil
+    }
+
+    @objc func refreshNow() { reload(force: true) }
+    @objc func openSettings() { showSettings() }
+    @objc func openHistory() { showHistory() }
+    @objc func openDashboard() { showDashboard() }
+
+    /// The dashboard window, made once; its figures are read again each time
+    /// it is brought forward.
+    func showDashboard() {
+        closePanel()
+        if dashboardWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: DashboardView(model: dashboard)))
+            window.title = "claudini-pilot Dashboard"
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
+            window.setContentSize(NSSize(width: dashboardWidth, height: 760))
+            window.isReleasedWhenClosed = false
+            window.center()
+            dashboardWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        dashboardWindow?.makeKeyAndOrderFront(nil)
+        loadDashboard()
+    }
+
+    func loadDashboard() {
+        dashboard.loading = true
+        engineQueue.async {
+            let (_, data) = engine(["--dashboard-json"])
+            let decoded = try? JSONDecoder().decode(DashboardData.self, from: data)
+            DispatchQueue.main.async {
+                self.dashboard.loading = false
+                self.dashboard.failed = decoded == nil && self.dashboard.data == nil
+                if let decoded { self.dashboard.data = decoded }
+            }
+        }
     }
 
     /// The engine owns the cadence; re-arm whenever it says something else.
@@ -67,6 +181,8 @@ final class Bar: NSObject, NSMenuDelegate {
         }
         snapshot = snap
         loadedAt = Date()
+        model.snapshot = snap
+        model.loadedAt = loadedAt
         publish(data, snap)
         let wanted = TimeInterval(snap.poll_after_sec)
         if timer?.timeInterval != wanted { schedule(wanted) }
@@ -96,11 +212,18 @@ final class Bar: NSObject, NSMenuDelegate {
         //
         // The figure is what has been *used*, like every row in the menu and
         // like the ring beside it.
+        let style = MenuBarStyle(rawValue: UserDefaults.standard.string(forKey: "menuBar.style") ?? "")
+            ?? .percent
         let title = NSMutableAttributedString()
-        if let binding = active.binding {
-            title.append(digits(" \(binding.label) \(binding.percent)%", 12, shade))
-        } else {
-            title.append(text(" ?", 12))
+        if style != .ring {
+            if let binding = active.binding {
+                title.append(digits(" \(binding.label) \(binding.percent)%", 12, shade))
+            } else {
+                title.append(text(" ?", 12))
+            }
+        }
+        if style == .name {
+            title.append(text(" " + active.name, 12, .regular, .secondaryLabelColor))
         }
         // The spent-model marker only means something while the policy is
         // protecting that model; in endurance mode it is just noise.
@@ -109,153 +232,6 @@ final class Bar: NSObject, NSMenuDelegate {
                               11, .bold, .systemRed))
         }
         item.button?.attributedTitle = title
-    }
-
-    // MARK: menu
-
-    func menuDidClose(_ menu: NSMenu) { menuOpen = false }
-
-    func menuWillOpen(_ menu: NSMenu) {
-        menuOpen = true
-        rebuild(menu)
-        // The open menu is drawn from the snapshot we already have; only ask
-        // the engine again when that snapshot has actually gone stale.
-        // The poll period, not the cache TTL: the snapshot is briefly older
-        // than the TTL at the end of every cycle, and refetching then buys
-        // seconds of freshness for a whole extra sweep of the API.
-        let due = TimeInterval(snapshot?.poll_after_sec ?? Int(defaultPoll))
-        if Date().timeIntervalSince(loadedAt) > due { reload() }
-    }
-
-    func rebuild(_ menu: NSMenu) {
-        menu.removeAllItems()
-        guard let snap = snapshot else {
-            menu.addItem(withTitle: "Loading…", action: nil, keyEquivalent: "")
-            return
-        }
-        let active = snap.profiles.first { $0.active }
-
-        menu.addItem(row(HeaderView(subtitle: snap.fleet,
-                                    status: snap.auto ? "Auto · \(snap.mode)" : "Auto off")))
-        menu.addItem(.separator())
-
-        // The account in use, drawn the way Claude draws its own limits.
-        if let active {
-            menu.addItem(row(SectionView("Using now")))
-            let title = AccountTitleView(active)
-            title.addSwitch(on: !active.disabled, y: 6) { [weak self] on in
-                self?.setInRotation(active.name, on)
-            }
-            menu.addItem(row(title))
-            if active.limits.isEmpty {
-                menu.addItem(row(StatusView(active)))
-            } else {
-                active.limits.forEach { menu.addItem(row(LimitView($0, muted: active.dimmed))) }
-            }
-            menu.addItem(.separator())
-        }
-
-        menu.addItem(row(SectionView("Next session")))
-        menu.addItem(row(NextView(snap.next)))
-        menu.addItem(.separator())
-
-        let others = snap.profiles.filter { !$0.active }
-        if !others.isEmpty {
-            menu.addItem(row(SectionView("Other accounts · best first")))
-            for profile in others {
-                let line = AccountRowView(profile)
-                line.addSwitch(on: !profile.disabled, y: 6) { [weak self] on in
-                    self?.setInRotation(profile.name, on)
-                }
-                // A switched-off account is not somewhere to go: switch it on
-                // first, or the next automatic tick would move you straight
-                // back off it.
-                if !profile.disabled {
-                    line.onClick = { [weak self] in
-                        if profile.needs_login { self?.reconnect(profile.name) }
-                        else { self?.switchTo(profile.name) }
-                    }
-                }
-                menu.addItem(row(line))
-            }
-        }
-        // Under the list, and there even when it is empty — the first extra
-        // account is when it is needed most.
-        let add = ActionRowView(title: "Add account…")
-        add.onClick = { [weak self] in self?.addAccount() }
-        menu.addItem(row(add))
-        menu.addItem(.separator())
-
-        if let notice = snap.throttle_notice {
-            menu.addItem(row(NoteView(notice)))
-        }
-        let refresh = ActionRowView(title: "Refresh", badge: updatedAgo(loadedAt))
-        refresh.onClick = { [weak self] in self?.reload(force: true) }
-        menu.addItem(row(refresh))
-
-        let auto = ActionRowView(title: "Auto-switching", badge: snap.auto ? "On" : "Off")
-        auto.onClick = { [weak self] in self?.toggleAuto() }
-        menu.addItem(row(auto))
-
-        // Two goals, two rankings: protect the preferred model, or spend the
-        // allowance that resets soonest so nothing expires unused.
-        let modes = NSMenuItem(title: "Mode", action: nil, keyEquivalent: "")
-        let submenu = NSMenu()
-        for mode in snap.modes {
-            let mi = NSMenuItem(title: mode.title, action: #selector(setMode(_:)),
-                                keyEquivalent: "")
-            mi.target = self
-            mi.representedObject = mode.name
-            mi.state = mode.name == snap.mode ? .on : .off
-            submenu.addItem(mi)
-        }
-        modes.submenu = submenu
-        menu.addItem(modes)
-
-        let history = NSMenuItem(title: "History…", action: #selector(showHistory),
-                                 keyEquivalent: "")
-        history.target = self
-        menu.addItem(history)
-
-        // What the tool can do outside this menu. Clicking copies the command,
-        // which is the only thing anyone wants from a list like this.
-        let commands = NSMenuItem(title: "Command line", action: nil, keyEquivalent: "")
-        let list = NSMenu()
-        for action in snap.actions {
-            let mi = NSMenuItem(title: action.command, action: #selector(copyCommand(_:)),
-                                keyEquivalent: "")
-            mi.target = self
-            mi.representedObject = action.command
-            let line = NSMutableAttributedString(attributedString:
-                mono(pad("claudini-usage " + action.command, 30), 12))
-            line.append(mono(" " + action.about, 11, .regular, .secondaryLabelColor))
-            mi.attributedTitle = line
-            list.addItem(mi)
-        }
-        commands.submenu = list
-        menu.addItem(commands)
-
-        menu.addItem(.separator())
-        let quit = NSMenuItem(title: "Quit claudini-pilot", action: #selector(quitApp),
-                              keyEquivalent: "q")
-        quit.target = self
-        menu.addItem(quit)
-    }
-
-    func row(_ view: NSView) -> NSMenuItem {
-        let item = NSMenuItem(title: "", action: nil, keyEquivalent: "")
-        item.view = view
-        // A click on a view in a menu reaches the item, not the view: without
-        // an action here, "Add account…", Refresh and switching did nothing.
-        if let clickable = view as? MenuRow, clickable.onClick != nil {
-            item.target = self
-            item.action = #selector(rowClicked(_:))
-        }
-        return item
-    }
-
-    @objc func rowClicked(_ sender: NSMenuItem) {
-        (sender.view as? MenuRow)?.fire()
     }
 
     // MARK: actions
@@ -285,6 +261,7 @@ final class Bar: NSObject, NSMenuDelegate {
     /// throwaway Claude Code config: the account in use and open sessions are
     /// not touched, and nothing switches.
     func addAccount() {
+        closePanel()
         let alert = NSAlert()
         alert.messageText = "Add a Claude account"
         alert.informativeText = "Give it a name, then log in with that account in the Terminal "
@@ -333,23 +310,62 @@ final class Bar: NSObject, NSMenuDelegate {
     }
 
     func switchTo(_ name: String) {
-        inBackground {
+        engineQueue.async {
             let code = engine(["--switch", name]).0
             DispatchQueue.main.async {
-                let alert = NSAlert()
                 if code == 0 {
-                    alert.messageText = "Now using \(name)"
-                    alert.informativeText = "Open `claude` sessions keep the account they "
-                        + "started with. Relaunch them to pick up \(name)."
+                    self.model.show("Now using \(name). Open claude sessions keep their account until relaunched.")
                 } else {
-                    alert.alertStyle = .critical
-                    alert.messageText = "Could not switch"
-                    alert.informativeText = "Try `claudini-usage --switch \(name)` in a terminal to see why."
+                    self.model.show("Could not switch to \(name): try claudini-usage --switch \(name)", error: true)
                 }
-                alert.runModal()
                 self.reload()
             }
         }
+    }
+
+    /// A setting or an account change: queued behind whatever is running —
+    /// unlike a poll, it is something you asked for — and the engine answers
+    /// with the snapshot that reflects it.
+    func command(_ args: [String]) {
+        engineQueue.async {
+            let (_, data) = engine(args)
+            DispatchQueue.main.async { self.apply(data) }
+        }
+    }
+
+    func rename(_ old: String, _ new: String) {
+        engineQueue.async {
+            let code = engine(["--rename", old, new]).0
+            DispatchQueue.main.async {
+                if code != 0 { self.model.show("Could not rename \(old)", error: true) }
+                self.reload()
+            }
+        }
+    }
+
+    func remove(_ name: String) {
+        engineQueue.async {
+            let code = engine(["--remove", name]).0
+            DispatchQueue.main.async {
+                self.model.show(code == 0 ? "\(name) removed" : "Could not remove \(name)", error: code != 0)
+                self.reload()
+            }
+        }
+    }
+
+    /// The settings window, made once and brought forward after that.
+    func showSettings() {
+        closePanel()
+        if settingsWindow == nil {
+            let window = NSWindow(contentViewController: NSHostingController(rootView: SettingsView(model: model)))
+            window.title = "claudini-pilot Settings"
+            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.isReleasedWhenClosed = false
+            window.center()
+            settingsWindow = window
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        settingsWindow?.makeKeyAndOrderFront(nil)
     }
 
     /// Put an account in or out of the rotation. Queued rather than dropped
@@ -359,10 +375,7 @@ final class Bar: NSObject, NSMenuDelegate {
     func setInRotation(_ name: String, _ on: Bool) {
         engineQueue.async {
             let (_, data) = engine([on ? "--on" : "--off", name, "--json"])
-            DispatchQueue.main.async {
-                self.apply(data)
-                if self.menuOpen, let menu = self.item.menu { self.rebuild(menu) }
-            }
+            DispatchQueue.main.async { self.apply(data) }
         }
     }
 
@@ -424,28 +437,11 @@ final class Bar: NSObject, NSMenuDelegate {
         }
     }
 
-    @objc func setMode(_ sender: NSMenuItem) {
-        guard let name = sender.representedObject as? String else { return }
-        // The engine answers a setting change with the new snapshot, so one
-        // interpreter start does both jobs.
-        ask(["--mode", name, "--json"])
-    }
-
-    func toggleAuto() {
-        let wanted = !(snapshot?.auto ?? false)
-        ask(["--auto", wanted ? "on" : "off", "--json"])
-    }
-
     /// The engine writes the page and opens it; it knows where it keeps the
     /// history, and the app has no business guessing.
-    @objc func showHistory() {
+    func showHistory() {
+        closePanel()
         inBackground { _ = engine(["--history"]) }
-    }
-
-    @objc func copyCommand(_ sender: NSMenuItem) {
-        guard let command = sender.representedObject as? String else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString("claudini-usage " + command, forType: .string)
     }
 
     @objc func quitApp() { NSApp.terminate(nil) }
@@ -458,7 +454,7 @@ final class Delegate: NSObject, NSApplicationDelegate {
         // After the activation that brought us here has settled: opened in
         // the same turn, the menu is dismissed again as the app comes forward.
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) {
-            bar.item.button?.performClick(nil)
+            bar.togglePanel()
         }
         return false
     }
@@ -499,82 +495,100 @@ func renderWidgetPreviews(into folder: URL, from file: URL?) {
     exit(0)
 }
 
-/// `ClaudiniBar --menu-preview DIR [SNAPSHOT.json]`: draw the open menu, light
-/// and dark, from the same rows the real one is built from. For the README,
-/// fed a made-up snapshot, so no real account appears in a picture.
+/// `ClaudiniBar --menu-preview DIR [SNAPSHOT.json]`: draw the panel, light and
+/// dark, from the same views the real one is built from. For the README, fed a
+/// made-up snapshot, so no real account appears in a picture.
 func renderMenuPreview(into folder: URL, from file: URL?) {
     let data = file.flatMap { try? Data(contentsOf: $0) } ?? engine(["--json"]).1
     guard let snapshot = try? JSONDecoder().decode(Snapshot.self, from: data) else { exit(1) }
     try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-
-    let preview = Bar(live: false)
-    preview.snapshot = snapshot
-    preview.loadedAt = Date()
-    let menu = NSMenu()
-    preview.rebuild(menu)
-    NSStatusBar.system.removeStatusItem(preview.item)
-
-    let pad: CGFloat = 6
-    let heights = menu.items.map { $0.view?.frame.height ?? ($0.isSeparatorItem ? 11 : 22) }
-    let size = NSSize(width: menuWidth, height: heights.reduce(pad * 2, +))
-
-    for (name, look) in [("light", NSAppearance.Name.aqua), ("dark", .darkAqua)] {
-        guard let appearance = NSAppearance(named: look),
-              let canvas = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(size.width * 2),
-                                            pixelsHigh: Int(size.height * 2), bitsPerSample: 8,
-                                            samplesPerPixel: 4, hasAlpha: true, isPlanar: false,
-                                            colorSpaceName: .deviceRGB, bytesPerRow: 0, bitsPerPixel: 0)
-        else { continue }
-        canvas.size = size
-        NSGraphicsContext.saveGraphicsState()
-        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: canvas)
-        appearance.performAsCurrentDrawingAppearance {
-            let panel = NSBezierPath(roundedRect: NSRect(origin: .zero, size: size).insetBy(dx: 0.5, dy: 0.5),
-                                     xRadius: 10, yRadius: 10)
-            (name == "dark" ? NSColor(white: 0.17, alpha: 1) : NSColor(white: 0.965, alpha: 1)).setFill()
-            panel.fill()
-            NSColor.separatorColor.setStroke()
-            panel.stroke()
-
-            var top = size.height - pad
-            for (item, height) in zip(menu.items, heights) {
-                top -= height
-                let slot = NSRect(x: 0, y: top, width: size.width, height: height)
-                if let view = item.view {
-                    view.appearance = appearance
-                    view.setFrameSize(NSSize(width: size.width, height: height))
-                    if let rows = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
-                        view.cacheDisplay(in: view.bounds, to: rows)
-                        // Over the panel: a bitmap on its own is drawn as a
-                        // copy, and would punch its transparency through it.
-                        let image = NSImage(size: slot.size)
-                        image.addRepresentation(rows)
-                        image.draw(in: slot, from: .zero, operation: .sourceOver, fraction: 1)
-                    }
-                } else if item.isSeparatorItem {
-                    NSColor.separatorColor.setFill()
-                    NSRect(x: inset, y: slot.midY, width: size.width - 2 * inset, height: 1).fill()
-                } else {
-                    // A native item: its title, and the chevron or shortcut beside it.
-                    let font = NSFont.menuFont(ofSize: 13)
-                    let title = NSAttributedString(string: item.title, attributes: [
-                        .font: font, .foregroundColor: NSColor.labelColor])
-                    title.draw(at: NSPoint(x: inset, y: slot.minY + (height - title.size().height) / 2))
-                    let hint = item.submenu != nil ? "›"
-                        : item.keyEquivalent.isEmpty ? "" : "⌘" + item.keyEquivalent.uppercased()
-                    let side = NSAttributedString(string: hint, attributes: [
-                        .font: font, .foregroundColor: NSColor.secondaryLabelColor])
-                    side.draw(at: NSPoint(x: size.width - inset - side.size().width,
-                                          y: slot.minY + (height - side.size().height) / 2))
-                }
-            }
+    let model = PanelModel()
+    model.preview = true
+    model.snapshot = snapshot
+    model.loadedAt = Date()
+    var both: [NSImage] = []
+    MainActor.assumeIsolated {
+        for scheme in [ColorScheme.light, .dark] {
+            let panel = PanelView(model: model)
+                .background(scheme == .dark ? Color(white: 0.17) : Color(white: 0.965))
+                .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                .environment(\.colorScheme, scheme)
+            let renderer = ImageRenderer(content: panel)
+            renderer.scale = 2
+            guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                  let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+            else { continue }
+            let path = folder.appendingPathComponent("menu-\(scheme == .dark ? "dark" : "light").png")
+            try? png.write(to: path)
+            print(path.path)
+            both.append(image)
         }
-        NSGraphicsContext.restoreGraphicsState()
-        let file = folder.appendingPathComponent("menu-\(name).png")
-        try? canvas.representation(using: .png, properties: [:])?.write(to: file)
-        print(file.path)
+    }
+    // Light and dark side by side: the README's picture.
+    if both.count == 2, let png = sideBySide(both, gap: 24) {
+        let path = folder.appendingPathComponent("menu.png")
+        try? png.write(to: path)
+        print(path.path)
     }
     exit(0)
+}
+
+/// Images next to each other on a transparent background, as PNG data.
+func sideBySide(_ images: [NSImage], gap: CGFloat) -> Data? {
+    let width = images.map(\.size.width).reduce(0, +) + gap * CGFloat(images.count - 1)
+    let height = images.map(\.size.height).max() ?? 0
+    guard let canvas = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: Int(width * 2),
+                                        pixelsHigh: Int(height * 2), bitsPerSample: 8, samplesPerPixel: 4,
+                                        hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                        bytesPerRow: 0, bitsPerPixel: 0) else { return nil }
+    canvas.size = NSSize(width: width, height: height)
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: canvas)
+    var x: CGFloat = 0
+    for image in images {
+        image.draw(in: NSRect(x: x, y: height - image.size.height, width: image.size.width,
+                              height: image.size.height))
+        x += image.size.width + gap
+    }
+    NSGraphicsContext.restoreGraphicsState()
+    return canvas.representation(using: .png, properties: [:])
+}
+
+/// `ClaudiniBar --dashboard-preview DIR [DASHBOARD.json]`: draw the dashboard,
+/// light and dark, and exit.
+func renderDashboardPreview(into folder: URL, from file: URL?) {
+    let data = file.flatMap { try? Data(contentsOf: $0) } ?? engine(["--dashboard-json"]).1
+    guard let decoded = try? JSONDecoder().decode(DashboardData.self, from: data) else {
+        FileHandle.standardError.write("the engine gave no dashboard\n".data(using: .utf8)!)
+        exit(1)
+    }
+    try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+    let model = DashboardModel()
+    model.preview = true
+    model.data = decoded
+    MainActor.assumeIsolated {
+        for scheme in [ColorScheme.light, .dark] {
+            let view = DashboardView(model: model)
+                .background(scheme == .dark ? Color(white: 0.13) : Color(white: 0.98))
+                .environment(\.colorScheme, scheme)
+            let renderer = ImageRenderer(content: view)
+            renderer.scale = 2
+            guard let image = renderer.nsImage, let tiff = image.tiffRepresentation,
+                  let png = NSBitmapImageRep(data: tiff)?.representation(using: .png, properties: [:])
+            else { continue }
+            let path = folder.appendingPathComponent("dashboard-\(scheme == .dark ? "dark" : "light").png")
+            try? png.write(to: path)
+            print(path.path)
+        }
+    }
+    exit(0)
+}
+
+if let flag = CommandLine.arguments.firstIndex(of: "--dashboard-preview"),
+   flag + 1 < CommandLine.arguments.count {
+    let arguments = CommandLine.arguments
+    renderDashboardPreview(into: URL(fileURLWithPath: arguments[flag + 1]),
+                           from: flag + 2 < arguments.count ? URL(fileURLWithPath: arguments[flag + 2]) : nil)
 }
 
 if let flag = CommandLine.arguments.firstIndex(of: "--menu-preview"),

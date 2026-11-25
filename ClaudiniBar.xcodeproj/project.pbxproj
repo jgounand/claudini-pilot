@@ -16,11 +16,13 @@
 		4C16D73A9CDD32D0CB655F53 /* Contract.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0EBA33AAF0C228E1959F2D50 /* Contract.swift */; };
 		7B11F9EBC48F07B271DD2348 /* SharedStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4B7E7A04658A5820931FFBC /* SharedStore.swift */; };
 		829E4FAF2B025ACAB8EFFF79 /* ClaudeWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 87FB7E6B7D06BDCD129D3D5B /* ClaudeWidget.swift */; };
+		83A3105692243BC9C0D4A93B /* Panel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 84B899363DFED3C765333FA4 /* Panel.swift */; };
 		92C035DFB6497FCC565F4A8E /* WidgetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 20A0677BEFA8DE669C104712 /* WidgetViews.swift */; };
 		A1CF58B9C9D682D7098A4CA5 /* ClaudiniBar.icns in Resources */ = {isa = PBXBuildFile; fileRef = D5242A57D41855A4416708D5 /* ClaudiniBar.icns */; };
-		ADC380BA66E2B04403B91BC4 /* Views.swift in Sources */ = {isa = PBXBuildFile; fileRef = 63E6A8C8D151ECF7E3F3404E /* Views.swift */; };
 		B40DC12EA869F28A2D57F10D /* main.swift in Sources */ = {isa = PBXBuildFile; fileRef = B21C8F98DF113E56C7C7CD2B /* main.swift */; };
+		D4F27F166DD994C518453DEA /* Settings.swift in Sources */ = {isa = PBXBuildFile; fileRef = 26124E18AE6175D8261D0CD2 /* Settings.swift */; };
 		D7DFC5071171DAC4DB97C15F /* Model.swift in Sources */ = {isa = PBXBuildFile; fileRef = A2A80F37A06E6696CF209FCE /* Model.swift */; };
+		E3FB69DA1B0460FF58D21BE1 /* Dashboard.swift in Sources */ = {isa = PBXBuildFile; fileRef = 23AB793045EF98703994FA01 /* Dashboard.swift */; };
 		E740B595407B524EF0347F79 /* ClaudiniWidget.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = CBC5043073E8CC0020FB8C65 /* ClaudiniWidget.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -51,8 +53,10 @@
 /* Begin PBXFileReference section */
 		0EBA33AAF0C228E1959F2D50 /* Contract.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Contract.swift; sourceTree = "<group>"; };
 		20A0677BEFA8DE669C104712 /* WidgetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WidgetViews.swift; sourceTree = "<group>"; };
+		23AB793045EF98703994FA01 /* Dashboard.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Dashboard.swift; sourceTree = "<group>"; };
+		26124E18AE6175D8261D0CD2 /* Settings.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Settings.swift; sourceTree = "<group>"; };
 		3B2C3AA62EABC18EAAE822CB /* Wording.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Wording.swift; sourceTree = "<group>"; };
-		63E6A8C8D151ECF7E3F3404E /* Views.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Views.swift; sourceTree = "<group>"; };
+		84B899363DFED3C765333FA4 /* Panel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Panel.swift; sourceTree = "<group>"; };
 		87FB7E6B7D06BDCD129D3D5B /* ClaudeWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeWidget.swift; sourceTree = "<group>"; };
 		A2A80F37A06E6696CF209FCE /* Model.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Model.swift; sourceTree = "<group>"; };
 		B21C8F98DF113E56C7C7CD2B /* main.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = main.swift; sourceTree = "<group>"; };
@@ -87,9 +91,11 @@
 			isa = PBXGroup;
 			children = (
 				D5242A57D41855A4416708D5 /* ClaudiniBar.icns */,
+				23AB793045EF98703994FA01 /* Dashboard.swift */,
 				B21C8F98DF113E56C7C7CD2B /* main.swift */,
 				A2A80F37A06E6696CF209FCE /* Model.swift */,
-				63E6A8C8D151ECF7E3F3404E /* Views.swift */,
+				84B899363DFED3C765333FA4 /* Panel.swift */,
+				26124E18AE6175D8261D0CD2 /* Settings.swift */,
 			);
 			path = menubar;
 			sourceTree = "<group>";
@@ -223,9 +229,11 @@
 			buildActionMask = 2147483647;
 			files = (
 				4C16D73A9CDD32D0CB655F53 /* Contract.swift in Sources */,
+				E3FB69DA1B0460FF58D21BE1 /* Dashboard.swift in Sources */,
 				D7DFC5071171DAC4DB97C15F /* Model.swift in Sources */,
+				83A3105692243BC9C0D4A93B /* Panel.swift in Sources */,
+				D4F27F166DD994C518453DEA /* Settings.swift in Sources */,
 				2FB9139F4360A6D78425D1B5 /* SharedStore.swift in Sources */,
-				ADC380BA66E2B04403B91BC4 /* Views.swift in Sources */,
 				92C035DFB6497FCC565F4A8E /* WidgetViews.swift in Sources */,
 				06B95189E0B992C302528642 /* Wording.swift in Sources */,
 				B40DC12EA869F28A2D57F10D /* main.swift in Sources */,

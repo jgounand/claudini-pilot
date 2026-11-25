@@ -33,10 +33,16 @@ reset countdowns. Good for a quick look or a shell prompt.
 **`claudini-auto`** — a terminal console that refreshes itself, lets you switch
 with a single keypress, and hosts the auto-switch toggle.
 
-**ClaudiniBar** — a menu bar app showing the active profile and its remaining
-headroom, with one-click switching and the same auto toggle.
+**ClaudiniBar** — a menu bar app. Its panel shows the fleet at a glance (accounts
+ready, weekly allowance left, the next one back, logins needed), the account in
+use with its three limits, and every other account in one table — grouped by
+workspace, filterable (ready, spent, off, needing a login), the same columns on
+every row, and a bounded height that scrolls however many accounts you have.
+Point at a row to use that account or switch it off; right-click for the rest.
+A settings window holds the policy, the accounts and the app's own options, and
+a dashboard window charts the history (below).
 
-![the menu, light and dark](docs/menu.png)
+![the panel, light and dark](docs/menu.png)
 
 **Claude usage widget** — the same figures on the desktop or in Notification
 Center, in three sizes, with each account's on/off switch. Comes with
@@ -164,15 +170,19 @@ figures, or from a saved snapshot:
 ClaudiniBar=/Applications/ClaudiniBar.app/Contents/MacOS/ClaudiniBar
 $ClaudiniBar --widget-previews /tmp/previews
 $ClaudiniBar --menu-preview /tmp/previews docs/sample-snapshot.json
+$ClaudiniBar --dashboard-preview /tmp/previews
 ```
 
-The pictures in this README come from `docs/sample-snapshot.json`, a snapshot
-with made-up accounts: render from that rather than screenshotting your own
-menu, which would publish your account names and workspaces.
+The pictures in this README come from made-up accounts: `python3
+docs/render_pictures.py` renders the panel from `docs/sample-snapshot.json` and
+the dashboard from five weeks of history it invents. Render from those rather
+than screenshotting your own, which would publish your account names and
+workspaces.
 
 ## Switching an account off
 
-Every account in the menu bar has a switch. Turn one off and it stays on screen
+Every account in the panel has a switch — shown when you point at its row, and
+always for an account that is off. Turn one off and it stays on screen
 with its figures, greyed out, but the policy never picks it: auto-switching
 won't move you there, it is never named as the next session, and its weekly
 allowance leaves the reserve figure. Turn it back on whenever you want.
@@ -366,7 +376,18 @@ It does not start by itself after a restart unless you ask it to:
 ```
 
 That registers an ordinary login item, removable from System Settings >
-General > Login Items like anything else.
+General > Login Items like anything else. The settings window has the same
+switch.
+
+For a history with no gaps — the dashboard's week-by-week view is only as
+complete as the log — add the recorder, a launchd agent that reads and logs
+every account every 15 minutes whether the app is open or not. It never
+switches, and while the app runs it costs nothing (readings are cached and
+samples spaced):
+
+```sh
+./install.sh --recorder        # and --no-recorder to undo
+```
 
 The Xcode project is generated from `project.yml` with
 [XcodeGen](https://github.com/yonaskolb/XcodeGen) and committed, so building
@@ -392,6 +413,9 @@ claudini-usage --off NAME      # switch an account off: shown, never chosen
 claudini-usage --on NAME       # and back on
 claudini-usage --force         # re-read now, skipping the per-account waiting periods
 claudini-usage --history       # write and open the usage history page
+claudini-usage --dashboard-json  # the dashboard's figures, as JSON
+claudini-usage --record        # read every account and log it, without switching
+claudini-usage --set max_usage 90       # or cooldown_min 5: the two numbers in the table below
 claudini-usage --actions       # the command list, as JSON (what the menu shows)
 claudini-usage --auto on|off   # arm or disarm auto-switching
 claudini-usage --mode model|endurance   # which goal the policy optimises for
@@ -404,7 +428,9 @@ claudini-run COMMAND…          # run COMMAND on the API credits that expire so
 claudini-auto                  # the console: a auto · m mode · r refresh · 1-9 switch · q quit
 ```
 
-Tuning lives in `~/.claudini/auto.json`:
+Tuning lives in `~/.claudini/auto.json`, and every key below can be changed
+from the settings window or the command line (`--auto`, `--mode`, `--drain`,
+`--set`, `--off`/`--on`):
 
 | key | default | meaning |
 |---|---|---|
@@ -413,7 +439,7 @@ Tuning lives in `~/.claudini/auto.json`:
 | `max_usage` | `95` | an account counts as spent once its fullest window reaches this %, and in `model` mode its Fable once that quota does — lower it to move off an account *before* hitting the wall |
 | `drain` | `true` | once every account is past `max_usage`, spend what is left above it, one account at a time, up to the wall |
 | `cooldown_min` | `10` | minutes after any switch, by hand or automatic, before the next automatic one |
-| `disabled` | `[]` | accounts switched off — set from the menu's switches or `--off` / `--on` |
+| `disabled` | `[]` | accounts switched off — set from the panel's switches or `--off` / `--on` |
 
 ## Switching, without claudini
 
@@ -475,16 +501,42 @@ the switches.
 Nothing is sent anywhere; the page is a local file with its charts drawn as
 inline SVG.
 
+Thirty days of readings is not enough to compare weeks, so each reading is also
+folded into `~/.claudini/history-daily.json`, which is kept for good: per day
+and per account, the weekly points spent (what the weekly figure gained above
+its highest point that week) and the highest figure seen, and every finished
+week with how much of it was used. About a kilobyte a day. It is rebuilt from
+the readings if it goes missing.
+
+## Dashboard
+
+**Dashboard** in the panel opens a window drawn from those two files:
+
+- **Capacity** — the weekly allowance left across the accounts in rotation, in
+  accounts' worth, over 24 hours, 7 or 30 days, with the coming week projected
+  at the last three days' pace and the moment it would run out.
+- **When capacity comes back** — each account until its weekly reset.
+- **Week by week** — per calendar week, what was spent against what the
+  accounts brought, what the unused part cost, and a grid of every account by
+  week.
+- **How much of each seat is used** — the share of each week used before it
+  reset, over the last four, and what the unused share costs a month at the
+  plan's list price.
+
+![the dashboard](docs/dashboard.png)
+
 ## Tests
 
 ```sh
 python3 tests/test_policy.py
+python3 tests/test_dashboard.py
 ```
 
 Tests over the deciding half of the engine — eligibility, both modes'
 rankings, what triggers a switch and what blocks it, switched-off accounts,
 the retry schedules, the status classification, the JSON the app and widget
-decode, and the settings. They run on hand-built rows:
+decode, and the settings — and over the dashboard's figures: the daily summary,
+weeks and resets, the pace, the forecast and the prices. They run on hand-built rows:
 no network, no keychain, no waiting. The I/O around them is exercised by using
 the tool.
 

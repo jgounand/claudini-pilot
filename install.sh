@@ -5,6 +5,8 @@
 #     ./install.sh                  install or update
 #     ./install.sh --at-login       also start ClaudiniBar at login
 #     ./install.sh --not-at-login   and undo that
+#     ./install.sh --recorder       also log every account every 15 minutes, app open or not
+#     ./install.sh --no-recorder    and undo that
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -28,6 +30,7 @@ fi
 TOOLS="$HOME/.claudini/tools"
 BIN="$HOME/.local/bin"
 
+
 mkdir -p "$TOOLS" "$BIN"
 ln -sfn "$REPO/src/claudini_usage.py" "$TOOLS/claudini_usage.py"
 ln -sfn "$REPO/src/claudini_auto.py"  "$TOOLS/claudini_auto.py"
@@ -36,6 +39,47 @@ ln -sfn "$REPO/src/claudini_usage.py" "$BIN/claudini-usage"
 ln -sfn "$REPO/src/claudini_auto.py"  "$BIN/claudini-auto"
 ln -sfn "$REPO/src/claudini_usage.py" "$BIN/claudini-run"
 echo "commands   -> $BIN/claudini-usage, $BIN/claudini-auto, $BIN/claudini-run"
+
+# The dashboard's week-by-week charts are only as complete as the log, and the
+# log is only written while something reads the accounts — the app polls every
+# five minutes, but only while it runs. The recorder is a launchd agent that
+# reads and logs every 15 minutes regardless; it never switches accounts, and
+# while the app runs it costs nothing (readings are cached, samples spaced).
+RECORDER="com.github.claudini-pilot.recorder"
+AGENT="$HOME/Library/LaunchAgents/$RECORDER.plist"
+case " $* " in
+  *" --recorder "*)
+    mkdir -p "$HOME/Library/LaunchAgents"
+    cat > "$AGENT" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>Label</key><string>$RECORDER</string>
+  <key>ProgramArguments</key><array>
+    <string>/usr/bin/env</string><string>python3</string>
+    <string>$TOOLS/claudini_usage.py</string><string>--record</string>
+  </array>
+  <key>EnvironmentVariables</key><dict>
+    <key>PATH</key><string>/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:/opt/homebrew/bin</string>
+  </dict>
+  <key>StartInterval</key><integer>900</integer>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>LowPriorityIO</key><true/>
+  <key>Nice</key><integer>10</integer>
+  <key>StandardErrorPath</key><string>$HOME/.claudini/recorder.log</string>
+</dict></plist>
+PLIST
+    launchctl bootout "gui/$(id -u)/$RECORDER" 2>/dev/null || true
+    launchctl bootstrap "gui/$(id -u)" "$AGENT"
+    echo "recorder   -> every 15 min ($AGENT)"
+    ;;
+  *" --no-recorder "*)
+    launchctl bootout "gui/$(id -u)/$RECORDER" 2>/dev/null || true
+    rm -f "$AGENT"
+    echo "recorder removed"
+    ;;
+esac
 
 # The app, with its widget when this Mac can sign one: that takes Xcode and an
 # "Apple Development" certificate (free with any Apple ID, from Xcode >
